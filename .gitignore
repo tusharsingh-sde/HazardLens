@@ -1,0 +1,10 @@
+# Ignore API keys
+.env
+
+# Ignore Virtual Environments (to reduce large file upload size)
+.venv/
+venv/
+__pycache__/
+
+# Ignore heavy default model (best.pt is just 6.8MB)
+yolov8n.pt
