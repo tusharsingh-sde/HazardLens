@@ -30,7 +30,7 @@ st.set_page_config(
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Inter:wght@300;400;500&family=Share+Tech+Mono&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Inter:wght@300;400;500&family=Share+Tech+Mono&display=swap');  
 
 :root {
   --bg:     #050A0F;
@@ -341,15 +341,15 @@ def create_placeholder(cam_name, status="STANDBY"):
     return img
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SARVAM AI TTS  (backend unchanged)
+# SARVAM AI TTS  (backend call to generate audio alert in Hindi for fire or crowd)
 # ─────────────────────────────────────────────────────────────────────────────
 def trigger_sarvam_loop(text):
     url     = "https://api.sarvam.ai/text-to-speech"
     payload = {
-        "inputs": [text], "target_language_code": "hi-IN", "speaker": "shruti",
-        "pace": 1.1, "speech_sample_rate": 8000, "enable_preprocessing": True, "model": "bulbul:v3"
+        "inputs": [text], "target_language_code": "hi-IN", "speaker": "shruti",  #language and speaker 
+        "pace": 1.1, "speech_sample_rate": 8000, "enable_preprocessing": True, "model": "bulbul:v3"  #pace, speech rate and speech model
     }
-    headers = {"api-subscription-key": SARVAM_API_KEY, "Content-Type": "application/json"}
+    headers = {"api-subscription-key": SARVAM_API_KEY, "Content-Type": "application/json"}  
     try:
         resp = requests.post(url, json=payload, headers=headers)
         if resp.status_code == 200:
@@ -373,7 +373,7 @@ with st.sidebar:
     st.markdown('<div class="sb-lbl">▸ Feed Source</div>', unsafe_allow_html=True)
     ip_url = st.text_input(
         "IP Camera Stream URL",
-        "http://192.168.1.7:8080/video",
+        "http://192.168.1.7:8080/video",   #IP camera stream URL
         label_visibility="collapsed"
     )
 
@@ -389,9 +389,9 @@ with st.sidebar:
     st.markdown('<div class="sb-lbl">▸ Camera Status</div>', unsafe_allow_html=True)
     armed_now = st.session_state.system_armed
     cam_registry = [
-        ("CAM 01", "MIET Main Gate",        True),
-        ("CAM 02", "Kankerkhera Crossing",  False),
-        ("CAM 03", "Parking Lot A",         False),
+        ("CAM 01", "MIET COLLEGE MAIN GATE",        True),
+        ("CAM 02", "RAILWAY STATION ENTRANCE",  False),
+        ("CAM 03", "METRO STATION ENTRANCE",         False),
         ("CAM 04", "Server Room Backend",   False),
     ]
     for cn, loc, active in cam_registry:
@@ -420,7 +420,7 @@ with st.sidebar:
     TTS ENGINE : SARVAM BULBUL V3<br>
     LANGUAGE &nbsp;&nbsp; : HI-IN<br>
     FRAME SKIP : 4 FRAMES<br>
-    CROWD LIM &nbsp;: 3 PERSONS<br>
+    CROWD LIM &nbsp;: 10 PERSONS<br>
     </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -485,7 +485,7 @@ with col1:
     <div class="{hdr_cls}">
       <div>
         <div class="cam-nm">📹 CAM 01</div>
-        <div class="cam-loc">MIET MAIN GATE · AI-MONITORED</div>
+        <div class="cam-loc">MIET COLLEGE MAIN GATE · AI-MONITORED</div>
       </div>
       {badge1}
     </div>""", unsafe_allow_html=True)
@@ -509,7 +509,7 @@ with col2:
     <div class="cam-hdr">
       <div>
         <div class="cam-nm">📷 CAM 02</div>
-        <div class="cam-loc">KANKERKHERA CROSSING · STANDBY</div>
+        <div class="cam-loc">RAILWAY STATION ENTRANCE · STANDBY</div>
       </div>
       {stdby_badge}
     </div>""", unsafe_allow_html=True)
@@ -528,7 +528,7 @@ with col3:
     <div class="cam-hdr">
       <div>
         <div class="cam-nm">📷 CAM 03</div>
-        <div class="cam-loc">PARKING LOT A · STANDBY</div>
+        <div class="cam-loc">METRO STATION ENTRANCE · STANDBY</div>
       </div>
       {stdby_badge}
     </div>""", unsafe_allow_html=True)
@@ -561,7 +561,7 @@ with col4:
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="ftr">
-  <span>⬡ HAZARDLENS COMMAND v2.0 · MIET CAMPUS, GHAZIABAD</span>
+  <span>⬡ HAZARDLENS COMMAND v2.0 · MIET CAMPUS, MEERUT</span>
   <span><span class="online">●</span> TWIN AI ONLINE · SARVAM TTS ENABLED</span>
   <span id="ftr-dt">—</span>
 </div>
@@ -601,9 +601,9 @@ if st.session_state.system_armed:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cctv_text = f"REC | CAM 01 | {now}"
             
-            # Pehle black border (stroke) taaki text har background par dikhe
+            # BLACK outline for better visibility
             cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 4, cv2.LINE_AA)
-            # Phir cyan color ka main text
+            # cyan color text
             cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
             # ───────────────────────────────────────
 
@@ -645,12 +645,12 @@ if st.session_state.system_armed:
                 </div>""", unsafe_allow_html=True)
                 trigger_sarvam_loop(
                     "Kripya dhyan dein. MIET Main Gate par aag detect hui hai. "
-                    "Turant fire safety team dispatch karein."
+                    "Turant fire safety team dispatch karein." #alert message in hindi for fire
                 )
                 st.session_state.alert_sent = True
 
             # ── OVERCROWDING ALERT ──
-            CROWD_THRESHOLD = 3
+            CROWD_THRESHOLD = 10  #crowd threshold for alert
             if person_count > CROWD_THRESHOLD and not st.session_state.crowd_alert_sent:
                 alert_pos.markdown(f"""
                 <div class="a-crwd">
@@ -661,8 +661,8 @@ if st.session_state.system_armed:
                   </div>
                 </div>""", unsafe_allow_html=True)
                 trigger_sarvam_loop(
-                    "Kripya dhyan dein. West Parking Zone mein bheed hadd se zyada badh gayi hai. "
-                    "Situation control karne ke liye turant guards dispatch karein."
+                    "Kripya dhyan dein. MIET Main Gate Entrance par overcrowding detect hui hai "
+                    "Turant security staff dispatch karein." #alert message in hindi for crowd
                 )
                 st.session_state.crowd_alert_sent = True
 
