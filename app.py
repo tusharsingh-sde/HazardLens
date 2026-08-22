@@ -326,29 +326,36 @@ def create_placeholder(cam_name, status="STANDBY"):
 
     return img
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ─── EDGE-TTS HINDI NEURAL VOICE (LIFETIME FREE) ───
+# ---------------------------------------------------------
+# --- EDGE-TTS HINDI NEURAL VOICE (LIFETIME FREE) ---
 # ('hi-IN-SwaraNeural')
-# ─────────────────────────────────────────────────────────────────────────────
-def trigger_hindi_alert(text):
-    async def _generate():
-        # for Female = "hi-IN-SwaraNeural" | for Male = "hi-IN-MadhurNeural"
-        communicate = edge_tts.Communicate(text, "hi-IN-SwaraNeural")
-        await communicate.save("temp_alert.mp3")
-    
-    try:
-        asyncio.run(_generate())
-        
-        with open("temp_alert.mp3", "rb") as f:
-            audio_b64 = base64.b64encode(f.read()).decode()
+# ---------------------------------------------------------
+def trigger_hindi_alert(text, filename="alert.mp3"):
+    # 1. Agar file already hai, toh wapas internet se mat maango (PREVENTS FREEZE)
+    if not os.path.exists(filename):
+        try:
+            async def _generate():
+                # for Female = "hi-IN-SwaraNeural" | for Male = "hi-IN-MadhurNeural"
+                communicate = edge_tts.Communicate(text, "hi-IN-SwaraNeural")
+                await communicate.save(filename)
             
-        audio_pos.markdown(
-            f'<audio id="alarm-audio" autoplay loop>'
-            f'<source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3"></audio>',
-            unsafe_allow_html=True
-        )
-        st.session_state.audio_loop = True
-    except Exception:
+            asyncio.run(_generate())
+        except Exception as e:
+            print(f"TTS Error: {e}")
+            pass
+
+    # 2. Local file ko turant read karo aur Native Streamlit Audio se play karo (0 LAG)
+    try:
+        if os.path.exists(filename):
+            with open(filename, "rb") as f:
+                audio_bytes = f.read()
+            
+            # HTML base64 hack ki jagah official st.audio use karo jo strictly bajta hai
+            audio_pos.audio(audio_bytes, format="audio/mp3", autoplay=True)
+            
+            st.session_state.audio_loop = True
+    except Exception as e:
+        print(f"Audio Playback Error: {e}")
         pass
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -613,7 +620,7 @@ if st.session_state.system_armed:
             )
 
             # ── 2. OVERCROWDING ALERT (Latest Override) ──
-            CROWD_THRESHOLD = 1  
+            CROWD_THRESHOLD = 5  
 
             # ── 1. FIRE / SMOKE ALERT ──
             if fire_spotted:
