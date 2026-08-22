@@ -7,6 +7,13 @@ from datetime import datetime
 import edge_tts
 import asyncio
 import os
+
+# ── EMAIL IMPORTS ADDED ──
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import threading
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
@@ -257,6 +264,7 @@ if 'crowd_alert_sent' not in st.session_state: st.session_state.crowd_alert_sent
 if 'audio_loop'       not in st.session_state: st.session_state.audio_loop       = False
 if 'system_armed'     not in st.session_state: st.session_state.system_armed     = False
 if 'do_clear_alert'   not in st.session_state: st.session_state.do_clear_alert   = False
+if 'active_alert'     not in st.session_state: st.session_state.active_alert     = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL LOADING  (cached for zero-lag reloads)
@@ -280,10 +288,12 @@ def silence_alerts():
     st.session_state.alert_sent       = False
     st.session_state.crowd_alert_sent = False
     st.session_state.do_clear_alert   = True
+    st.session_state.active_alert     = None
 
 def disarm_system():
     st.session_state.system_armed   = False
     st.session_state.do_clear_alert = True
+    st.session_state.active_alert   = None
 
 def arm_system():
     st.session_state.system_armed = True
@@ -328,35 +338,108 @@ def create_placeholder(cam_name, status="STANDBY"):
 
 # ---------------------------------------------------------
 # --- EDGE-TTS HINDI NEURAL VOICE (LIFETIME FREE) ---
-# ('hi-IN-SwaraNeural')
 # ---------------------------------------------------------
 def trigger_hindi_alert(text, filename="alert.mp3"):
-    # 1. Agar file already hai, toh wapas internet se mat maango (PREVENTS FREEZE)
     if not os.path.exists(filename):
         try:
             async def _generate():
-                # for Female = "hi-IN-SwaraNeural" | for Male = "hi-IN-MadhurNeural"
                 communicate = edge_tts.Communicate(text, "hi-IN-SwaraNeural")
                 await communicate.save(filename)
-            
             asyncio.run(_generate())
         except Exception as e:
             print(f"TTS Error: {e}")
             pass
 
-    # 2. Local file ko turant read karo aur Native Streamlit Audio se play karo (0 LAG)
     try:
         if os.path.exists(filename):
             with open(filename, "rb") as f:
                 audio_bytes = f.read()
-            
-            # HTML base64 hack ki jagah official st.audio use karo jo strictly bajta hai
             audio_pos.audio(audio_bytes, format="audio/mp3", autoplay=True)
-            
             st.session_state.audio_loop = True
     except Exception as e:
         print(f"Audio Playback Error: {e}")
         pass
+
+# ---------------------------------------------------------
+# --- EMAIL ALERT SYSTEM (BACKGROUND THREADING) ---
+# ---------------------------------------------------------
+def send_email_worker(detection_type, person_count=0):
+    """Background task to send email without freezing the UI."""
+    try:
+        # ⚠️ YAHAN APNI DETAILS DAAL BHAI ⚠️
+        SENDER_EMAIL = "admin@example.com" 
+        APP_PASSWORD = "REDACTED_PASSWORD" 
+        ADMIN_EMAIL  = "nitinpanwar6963@gmail.com"
+
+        msg = MIMEMultipart()
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = ADMIN_EMAIL
+        msg['Subject'] = f"🚨 URGENT: {detection_type.upper()} DETECTED AT MIET GATE!"
+
+        # Dynamic color and text based on hazard
+        is_fire = detection_type.upper() in ["FIRE", "SMOKE"]
+        bg_color = "#240000" if is_fire else "#291c00"
+        border_color = "#FF3A3A" if is_fire else "#FFB800"
+        
+        detail_msg = "Fire Safety Team required immediately!" if is_fire else f"Crowd limit exceeded (Live Count: {person_count} persons)."
+
+        html_content = f"""
+        <html>
+        <head>
+            <style>
+                .container {{
+                    background-color: #050A0F;
+                    padding: 30px;
+                    font-family: 'Courier New', Courier, monospace;
+                    color: #DCE8F0;
+                }}
+                .alert-box {{
+                    background-color: {bg_color};
+                    border-left: 5px solid {border_color};
+                    padding: 20px;
+                    border-radius: 4px;
+                }}
+                .header {{
+                    color: {border_color};
+                    font-size: 22px;
+                    font-weight: bold;
+                    margin-bottom: 10px;
+                }}
+                .meta {{ color: #7899B8; font-size: 14px; margin-top: 20px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="alert-box">
+                    <div class="header">⚠️ HAZARD LENS SYSTEM ALERT</div>
+                    <p style="font-size: 18px;"><strong>Hazard Type:</strong> {detection_type.upper()}</p>
+                    <p style="font-size: 16px;"><strong>Location:</strong> CAM 01 (MIET College Main Gate)</p>
+                    <p style="font-size: 16px;"><strong>Details:</strong> {detail_msg}</p>
+                </div>
+                <div class="meta">
+                    <p>Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                    <p><em>This is an automated alert generated by HazardLens Command Center.</em></p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        msg.attach(MIMEText(html_content, 'html'))
+
+        # Send Email
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(SENDER_EMAIL, APP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print(f"✅ Email Alert Sent for {detection_type}")
+    except Exception as e:
+        print(f"❌ Failed to send email: {e}")
+
+def trigger_alert_email(detection_type, person_count=0):
+    """Triggers the email worker in a background thread."""
+    thread = threading.Thread(target=send_email_worker, args=(detection_type, person_count), daemon=True)
+    thread.start()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR — Control Panel
@@ -553,11 +636,11 @@ st.markdown("""
   <span id="ftr-dt">—</span>
 </div>
 <script>
-(function(){{
+(function(){
   var el = document.getElementById('ftr-dt');
   if(el) el.textContent = new Date().toLocaleDateString('en-IN',
-    {{weekday:'short', year:'numeric', month:'short', day:'numeric'}});
-}})();
+    {weekday:'short', year:'numeric', month:'short', day:'numeric'});
+})();
 </script>
 """, unsafe_allow_html=True)
 
@@ -639,11 +722,15 @@ if st.session_state.system_armed:
                         "कृपया ध्यान दें। मेन गेट पर आग डिटेक्ट हुई है। तुरंत फायर सेफ्टी टीम डिस्पैच करें।",
                         filename="fire_alert.mp3"
                     )
+                    
+                    # ── THREADED EMAIL ALERT CALL ──
+                    trigger_alert_email("Fire/Smoke")
+                    
                     st.session_state.active_alert = "FIRE"
 
             # ── 2. OVERCROWDING ALERT (Latest Override) ──
             elif person_count > CROWD_THRESHOLD:
-                # Trigger only if no Fire Alert is currently active (Fire Alert overrides Crowd Alert).
+                # Trigger only if no Crowd Alert is currently active (Fire Alert overrides Crowd Alert).
                 if st.session_state.get("active_alert") != "CROWD":
                     alert_pos.markdown(f"""
                     <div class="a-crwd">
@@ -658,6 +745,10 @@ if st.session_state.system_armed:
                         "कृपया ध्यान दें। मेन गेट एंट्रेंस पर ओवरक्राउडिंग डिटेक्ट हुई है। तुरंत सिक्योरिटी स्टाफ डिस्पैच करें।",
                         filename="crowd_alert.mp3"
                     )
+                    
+                    # ── THREADED EMAIL ALERT CALL ──
+                    trigger_alert_email("Overcrowding", person_count)
+                    
                     st.session_state.active_alert = "CROWD"
             
             # ── 3. RESET (if no alerts are detected) ──
