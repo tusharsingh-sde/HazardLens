@@ -240,10 +240,11 @@ The command center will launch in your default browser at **`http://localhost:85
 3. In the HazardLens sidebar **Control Panel**, paste your camera's stream URL into the **Feed Source** field
    - Default: `http://192.168.1.7:8080/video`
    - Make sure your phone and computer are on the **same Wi-Fi network**
+   - Alternatively, toggle **Offline Demo Mode** to test with the built-in demo video (`assets/demo_feed.mp4`) with zero camera dependencies.
 
-### Email Alerts (Optional)
+### Environment & Security Configuration
 
-To enable automated email dispatch on hazard detection, create a `.env` file from the provided `.env.example` template:
+Create a local `.env` file from the provided `.env.example` template:
 
 ```bash
 # Windows (PowerShell)
@@ -253,27 +254,37 @@ Copy-Item .env.example .env
 cp .env.example .env
 ```
 
-Open `.env` and fill in your Resend API credentials:
+Open `.env` and fill in your settings:
 
 ```env
+# Resend API for Automated Email Alerts
 RESEND_API_KEY=re_your_api_key_here
 HAZARDLENS_FROM_EMAIL=onboarding@resend.dev
 HAZARDLENS_ADMIN_EMAIL=admin-recipient@example.com
+
+# Operator Passkey Gate (protects ARM / DISARM / SILENCE controls)
+HAZARDLENS_OPERATOR_PIN=1234
+
+# PyTorch Model Integrity Check (SHA-256)
+HAZARDLENS_MODEL_SHA256=18d47a2e606035a2f1b5303050125a3c6c53b679a7a1b27b25bd72d7a63b3ec3
 ```
 
 > **Security Note:** Never commit your `.env` file to version control. It is listed in `.gitignore`.  
 > **Tip:** Obtain your free API key at [resend.com](https://resend.com). For testing, `onboarding@resend.dev` can send alerts to your verified account email.
 
-### Verify Email Setup
+### Run Automated Verification & Security Tests
 
-Check that your credentials are functional before arming the live surveillance system:
+Run the security and email verification suites before deployment:
 
 ```bash
-# 1. Validate configuration only (does not send an email)
+# 1. Validate email credentials & configuration
 python scripts/check_resend.py
 
 # 2. Dispatch a single real test email to HAZARDLENS_ADMIN_EMAIL
 python scripts/check_resend.py --send
+
+# 3. Run complete automated test suite (SSRF validation, PIN gating, model integrity, email retries)
+pytest
 ```
 
 ### Detection Thresholds
@@ -295,15 +306,16 @@ All thresholds and timing constants are defined as top-level constants in [`app.
 ## 🖥️ Usage
 
 1. **Launch** the app with `streamlit run app.py`
-2. **Configure** your IP camera URL in the sidebar
-3. **ARM** the system by clicking the 🔴 **ARM** button
-4. The live feed from **CAM 01** will begin processing with dual AI engines
-5. When a hazard is detected:
+2. **Authenticate** as Operator in the sidebar using your PIN (default: `1234`) to unlock controls
+3. **Configure** your IP camera URL or select **Offline Demo Mode**
+4. **ARM** the system by clicking the 🔴 **ARM** button
+5. The live feed from **CAM 01** will begin processing with dual AI engines
+6. When a hazard is detected:
    - A **visual alert banner** animates on-screen (red for fire, amber for crowd)
    - A **Hindi voice alert** plays automatically
    - An **email alert** is dispatched to the admin (if configured)
-6. Click **🔕 SILENCE** to dismiss active alerts
-7. Click **⬛ DISARM** to stop monitoring
+7. Click **🔕 SILENCE** to mute active alerts for 60 seconds
+8. Click **⬛ DISARM** to stop monitoring
 
 ---
 
@@ -314,11 +326,19 @@ HazardLens/
 ├── alerts/
 │   ├── __init__.py        # Alerts package initializer
 │   └── email_alerts.py    # Resend API queued background worker with retries
+├── assets/
+│   └── demo_feed.mp4      # Offline demo surveillance video stream
 ├── scripts/
 │   └── check_resend.py    # Standalone Resend configuration & live email verification
 ├── tests/
 │   ├── __init__.py        # Tests package initializer
-│   └── test_email_alerts.py # Unit tests for cooldown, retries, and missing env
+│   ├── test_email_alerts.py # Unit tests for email cooldown, retries, and missing env
+│   └── test_security.py   # Automated tests for SSRF, PIN authentication & model SHA-256
+├── utils/
+│   ├── __init__.py        # Utilities package initializer
+│   └── security.py        # SSRF URL validator, timing-safe PIN check & model hasher
+├── .streamlit/
+│   └── config.toml        # Production hardening (CORS, XSRF, error masking)
 ├── app.py                 # Main application — UI, inference, non-blocking alerts
 ├── best.pt                # Custom-trained fire/smoke YOLOv8 model
 ├── yolov8n.pt             # Pre-trained YOLOv8n (auto-downloaded if missing)
