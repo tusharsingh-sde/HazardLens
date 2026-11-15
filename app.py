@@ -1,6 +1,5 @@
 import streamlit as st
 import cv2
-import base64
 import numpy as np
 from ultralytics import YOLO
 from datetime import datetime
@@ -37,6 +36,7 @@ FRAME_SKIP            = 4
 EMAIL_COOLDOWN_SEC    = 120
 AUDIO_COOLDOWN_SEC    = 120
 ALERT_CLEAR_GRACE_SEC = 3.0  # Debounce: delay clearing alerts by 3s to prevent visual banner flicker
+SILENCE_DURATION_SEC  = 60   # Cooldown: mute alerts for 60s when operator clicks Silence
 
 # Thread-safety lock for YOLO / PyTorch model inference across threads
 model_inference_lock = threading.Lock()
@@ -341,13 +341,11 @@ section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
 # ─────────────────────────────────────────────────────────────────────────────
 # STATE MANAGEMENT
 # ─────────────────────────────────────────────────────────────────────────────
-if 'alert_sent'       not in st.session_state: st.session_state.alert_sent       = False
-if 'crowd_alert_sent' not in st.session_state: st.session_state.crowd_alert_sent = False
-if 'audio_loop'       not in st.session_state: st.session_state.audio_loop       = False
 if 'system_armed'     not in st.session_state: st.session_state.system_armed     = False
 if 'do_clear_alert'   not in st.session_state: st.session_state.do_clear_alert   = False
 if 'active_alert'     not in st.session_state: st.session_state.active_alert     = None
 if 'hazard_clear_ts'  not in st.session_state: st.session_state.hazard_clear_ts  = None
+if 'silenced_until'   not in st.session_state: st.session_state.silenced_until   = 0.0
 if 'last_audio_ts'    not in st.session_state: st.session_state.last_audio_ts    = {"FIRE": 0.0, "CROWD": 0.0}
 if 'camera_worker'    not in st.session_state: st.session_state.camera_worker    = None
 
@@ -369,18 +367,19 @@ def dummy_silence(cam_name):
     st.toast(f"ℹ️ {cam_name} is on STANDBY — no active alerts to silence.")
 
 def silence_alerts():
-    st.session_state.audio_loop       = False
-    st.session_state.alert_sent       = False
-    st.session_state.crowd_alert_sent = False
-    st.session_state.do_clear_alert   = True
-    st.session_state.active_alert     = None
-    st.session_state.hazard_clear_ts  = None
+    now = time.time()
+    st.session_state.silenced_until  = now + SILENCE_DURATION_SEC
+    st.session_state.do_clear_alert  = True
+    st.session_state.active_alert    = None
+    st.session_state.hazard_clear_ts = None
+    st.toast(f"🔕 CAM 01 alerts silenced for {SILENCE_DURATION_SEC}s.")
 
 def disarm_system():
     st.session_state.system_armed    = False
     st.session_state.do_clear_alert  = True
     st.session_state.active_alert    = None
     st.session_state.hazard_clear_ts = None
+    st.session_state.silenced_until  = 0.0
     if st.session_state.get('camera_worker') is not None:
         st.session_state.camera_worker.stop()
         st.session_state.camera_worker = None
@@ -448,7 +447,6 @@ def trigger_hindi_alert(text):
             with open(filename, "rb") as f:
                 audio_bytes = f.read()
             audio_pos.audio(audio_bytes, format="audio/mp3", autoplay=True)
-            st.session_state.audio_loop = True
     except Exception as e:
         print(f"TTS Error: {e}")
 
@@ -670,9 +668,7 @@ audio_pos = st.empty()
 if st.session_state.do_clear_alert:
     alert_pos.empty()
     audio_pos.empty()
-    st.session_state.alert_sent       = False
-    st.session_state.crowd_alert_sent = False
-    st.session_state.do_clear_alert   = False
+    st.session_state.do_clear_alert = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CAMERA GRID
@@ -831,8 +827,21 @@ def update_live_monitoring():
             unsafe_allow_html=True
         )
 
-    # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins" + Debounced Clearing) ──
+    # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins" + Silence Cooldown + Debounced Clearing) ──
     now = time.time()
+    is_silenced = (now < st.session_state.get('silenced_until', 0.0))
+
+    if is_silenced:
+        # Operator has silenced alerts: clear active banners and suppress audio & email dispatches
+        alert_pos.empty()
+        audio_pos.empty()
+        # If the hazard clears completely while silenced, auto-reset silence early
+        if not fire_spotted and person_count <= CROWD_THRESHOLD:
+            st.session_state.silenced_until  = 0.0
+            st.session_state.active_alert    = None
+            st.session_state.hazard_clear_ts = None
+        return
+
     if fire_spotted:
         st.session_state.hazard_clear_ts = None
         # Fire alert overrides Crowd alert

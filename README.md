@@ -54,7 +54,7 @@ Traditional CCTV systems are **passive monitoring tools**. In emergency situatio
 | 🔥 **Fire & Smoke Detection** | Custom fine-tuned YOLOv8 model with multilingual class mapping (EN/ZH) and `conf ≥ 0.68` threshold |
 | 👥 **Crowd Monitoring** | Real-time person counting via YOLOv8n with configurable overcrowding threshold |
 | 🎙️ **Hindi Neural Voice Alerts** | Locally powered by Microsoft Edge-TTS (`hi-IN-SwaraNeural`) — free, fast, and offline-capable |
-| 📧 **Automated Email Dispatch** | Threaded HTML email alerts sent to the security admin via SMTP (non-blocking) |
+| 📧 **Automated Email Dispatch** | Queued HTML email alerts sent to the security admin via Resend API (non-blocking background worker with retry) |
 | ⚡ **"Latest Hazard Wins" Engine** | Prevents UI freezes, alert looping, and audio overlapping via a finite state machine |
 | 📹 **IP Camera / CCTV Support** | Direct OpenCV frame stream ingestion from any RTSP / HTTP video source |
 | 🖥️ **Tactical Command Center UI** | Dark-themed, military-inspired dashboard with 4-camera grid, live metrics, and animated alert banners |
@@ -99,7 +99,7 @@ Traditional CCTV systems are **passive monitoring tools**. In emergency situatio
               ▼                 ▼                  ▼
     ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐
     │ 🖥️ Visual     │  │ 🎙️ Voice     │  │ 📧 Email Alert   │
-    │ Alert Banner  │  │ Alert (TTS)  │  │ (SMTP Thread)    │
+    │ Alert Banner  │  │ Alert (TTS)  │  │ (Resend Worker)  │
     │ (Streamlit)   │  │ (Edge-TTS)   │  │ (Background)     │
     └──────────────┘  └──────────────┘  └──────────────────┘
 ```
@@ -287,6 +287,8 @@ All thresholds and timing constants are defined as top-level constants in [`app.
 | Frame Skip | `4 frames` | `FRAME_SKIP` | Process every Nth frame for real-time edge throughput |
 | Email Cooldown | `120 seconds` | `EMAIL_COOLDOWN_SEC` | Minimum interval between email dispatches per hazard type |
 | Audio Cooldown | `120 seconds` | `AUDIO_COOLDOWN_SEC` | Minimum interval between audio voice broadcasts per hazard type |
+| Alert Clear Grace | `3.0 seconds` | `ALERT_CLEAR_GRACE_SEC` | Debounce window to prevent alert banner flickering on borderline detections |
+| Silence Duration | `60 seconds` | `SILENCE_DURATION_SEC` | Suppression window when operator silences active alerts |
 
 ---
 
