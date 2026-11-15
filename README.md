@@ -116,7 +116,11 @@ Traditional CCTV systems are **passive monitoring tools**. In emergency situatio
 | **Fire/Smoke Model** | Custom fine-tuned YOLOv8 (`best.pt` — ~6 MB) |
 | **Crowd Model** | YOLOv8n pre-trained (`yolov8n.pt` — ~6 MB, auto-downloaded) |
 | **Voice Engine** | [Microsoft Edge-TTS](https://pypi.org/project/edge-tts/) (`hi-IN-SwaraNeural`) |
+<<<<<<< HEAD
 | **Email Alerts** | Python `smtplib` + `email.mime` (threaded, non-blocking) |
+=======
+| **Email Alerts** | [Resend](https://resend.com) Python SDK (queued background worker with retry) |
+>>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 | **Runtime** | Python 3.10+ with `asyncio` |
 
 ---
@@ -216,6 +220,11 @@ This will install:
 | `edge-tts >=6.1.10` | Hindi neural voice synthesis |
 | `numpy >=1.24.0` | Numerical array operations |
 | `pillow >=10.0.0` | Image utilities |
+<<<<<<< HEAD
+=======
+| `python-dotenv >=1.0.0` | Environment configuration management |
+| `resend >=2.0.0` | Official Resend API client for email alerts |
+>>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 
 ---
 
@@ -241,6 +250,7 @@ The command center will launch in your default browser at **`http://localhost:85
 
 ### Email Alerts (Optional)
 
+<<<<<<< HEAD
 To enable automated email dispatch on hazard detection, edit the following variables in [`app.py`](app.py) (lines 370–372):
 
 ```python
@@ -258,6 +268,52 @@ ADMIN_EMAIL   = "admin-recipient@example.com"
 | Fire/Smoke Confidence | `0.68` | `app.py` line 666 |
 | Crowd Threshold | `5 persons` | `app.py` line 706 |
 | Frame Skip | `4 frames` | `app.py` line 655 |
+=======
+To enable automated email dispatch on hazard detection, create a `.env` file from the provided `.env.example` template:
+
+```bash
+# Windows (PowerShell)
+Copy-Item .env.example .env
+
+# Linux / macOS
+cp .env.example .env
+```
+
+Open `.env` and fill in your Resend API credentials:
+
+```env
+RESEND_API_KEY=re_your_api_key_here
+HAZARDLENS_FROM_EMAIL=onboarding@resend.dev
+HAZARDLENS_ADMIN_EMAIL=admin-recipient@example.com
+```
+
+> **Security Note:** Never commit your `.env` file to version control. It is listed in `.gitignore`.  
+> **Tip:** Obtain your free API key at [resend.com](https://resend.com). For testing, `onboarding@resend.dev` can send alerts to your verified account email.
+
+### Verify Email Setup
+
+Check that your credentials are functional before arming the live surveillance system:
+
+```bash
+# 1. Validate configuration only (does not send an email)
+python scripts/check_resend.py
+
+# 2. Dispatch a single real test email to HAZARDLENS_ADMIN_EMAIL
+python scripts/check_resend.py --send
+```
+
+### Detection Thresholds
+
+All thresholds and timing constants are defined as top-level constants in [`app.py`](app.py) for easy tuning:
+
+| Parameter | Default | Constant in `app.py` | Description |
+|---|---|---|---|
+| Fire/Smoke Confidence | `0.68` | `FIRE_CONF_THRESHOLD` | Minimum confidence score for fire/smoke detection |
+| Crowd Threshold | `5 persons` | `CROWD_THRESHOLD` | Maximum person count before triggering crowd alert |
+| Frame Skip | `4 frames` | `FRAME_SKIP` | Process every Nth frame for real-time edge throughput |
+| Email Cooldown | `120 seconds` | `EMAIL_COOLDOWN_SEC` | Minimum interval between email dispatches per hazard type |
+| Audio Cooldown | `120 seconds` | `AUDIO_COOLDOWN_SEC` | Minimum interval between audio voice broadcasts per hazard type |
+>>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 
 ---
 
@@ -280,6 +336,7 @@ ADMIN_EMAIL   = "admin-recipient@example.com"
 
 ```
 HazardLens/
+<<<<<<< HEAD
 ├── app.py                 # Main application — UI, inference, alerts
 ├── best.pt                # Custom-trained fire/smoke YOLOv8 model
 ├── yolov8n.pt             # Pre-trained YOLOv8n (auto-downloaded if missing)
@@ -288,6 +345,25 @@ HazardLens/
 ├── temp_alert.mp3         # Generated Hindi TTS alert for crowd events
 ├── .gitignore             # Git ignore rules
 └── README.md              # This file
+=======
+├── alerts/
+│   ├── __init__.py        # Alerts package initializer
+│   └── email_alerts.py    # Resend API queued background worker with retries
+├── scripts/
+│   └── check_resend.py    # Standalone Resend configuration & live email verification
+├── tests/
+│   ├── __init__.py        # Tests package initializer
+│   └── test_email_alerts.py # Unit tests for cooldown, retries, and missing env
+├── app.py                 # Main application — UI, inference, non-blocking alerts
+├── best.pt                # Custom-trained fire/smoke YOLOv8 model
+├── yolov8n.pt             # Pre-trained YOLOv8n (auto-downloaded if missing)
+├── requirements.txt       # Python dependencies
+├── .env.example           # Environment configuration template
+├── .env                   # Local credentials (ignored by git)
+├── alert_<hash>.mp3       # Generated Hindi TTS alerts (hashed by text content)
+├── .gitignore             # Git ignore rules
+└── README.md              # Project documentation
+>>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 ```
 
 ---

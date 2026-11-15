@@ -7,12 +7,44 @@ from datetime import datetime
 import edge_tts
 import asyncio
 import os
+<<<<<<< HEAD
 
 # ── EMAIL IMPORTS ADDED ──
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import threading
+=======
+import hashlib
+import time
+import threading
+from dotenv import load_dotenv
+
+# ── RESEND EMAIL ALERT SERVICE ──
+from alerts.email_alerts import EmailAlerter
+
+# Load environment variables from .env
+load_dotenv()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODULE INSTANCES
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_resource
+def get_email_alerter():
+    """Module-level single EmailAlerter worker cached across Streamlit reruns."""
+    return EmailAlerter()
+
+email_alerter = get_email_alerter()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURATION CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+FIRE_CONF_THRESHOLD = 0.68
+CROWD_THRESHOLD     = 5
+FRAME_SKIP          = 4
+EMAIL_COOLDOWN_SEC  = 120
+AUDIO_COOLDOWN_SEC  = 120
+>>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -265,6 +297,11 @@ if 'audio_loop'       not in st.session_state: st.session_state.audio_loop      
 if 'system_armed'     not in st.session_state: st.session_state.system_armed     = False
 if 'do_clear_alert'   not in st.session_state: st.session_state.do_clear_alert   = False
 if 'active_alert'     not in st.session_state: st.session_state.active_alert     = None
+<<<<<<< HEAD
+=======
+if 'last_audio_ts'    not in st.session_state: st.session_state.last_audio_ts    = {"FIRE": 0.0, "CROWD": 0.0}
+if 'camera_worker'    not in st.session_state: st.session_state.camera_worker    = None
+>>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL LOADING  (cached for zero-lag reloads)
@@ -294,6 +331,12 @@ def disarm_system():
     st.session_state.system_armed   = False
     st.session_state.do_clear_alert = True
     st.session_state.active_alert   = None
+<<<<<<< HEAD
+=======
+    if st.session_state.get('camera_worker') is not None:
+        st.session_state.camera_worker.stop()
+        st.session_state.camera_worker = None
+>>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 
 def arm_system():
     st.session_state.system_armed = True
@@ -339,26 +382,134 @@ def create_placeholder(cam_name, status="STANDBY"):
 # ---------------------------------------------------------
 # --- EDGE-TTS HINDI NEURAL VOICE (LIFETIME FREE) ---
 # ---------------------------------------------------------
+<<<<<<< HEAD
 def trigger_hindi_alert(text, filename="alert.mp3"):
     if not os.path.exists(filename):
         try:
+=======
+def trigger_hindi_alert(text):
+    """Generate and play neural voice alert; hashed filename prevents stale audio caches."""
+    try:
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:8]
+        filename = f"alert_{text_hash}.mp3"
+
+        if not os.path.exists(filename):
+>>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
             async def _generate():
                 communicate = edge_tts.Communicate(text, "hi-IN-SwaraNeural")
                 await communicate.save(filename)
             asyncio.run(_generate())
-        except Exception as e:
-            print(f"TTS Error: {e}")
-            pass
 
+<<<<<<< HEAD
     try:
+=======
+>>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
         if os.path.exists(filename):
             with open(filename, "rb") as f:
                 audio_bytes = f.read()
             audio_pos.audio(audio_bytes, format="audio/mp3", autoplay=True)
             st.session_state.audio_loop = True
     except Exception as e:
-        print(f"Audio Playback Error: {e}")
-        pass
+        print(f"TTS Error: {e}")
+
+# ---------------------------------------------------------
+# --- THREADED CAMERA WORKER (NON-BLOCKING INFERENCE) ---
+# ---------------------------------------------------------
+class CameraWorker:
+    """Background worker for non-blocking video capture and YOLO inference."""
+    def __init__(self, ip_url, fire_mod, base_mod, fire_conf, crowd_thresh, frame_skip):
+        self.ip_url = ip_url
+        self.fire_model = fire_mod
+        self.base_model = base_mod
+        self.fire_conf = fire_conf
+        self.crowd_threshold = crowd_thresh
+        self.frame_skip = frame_skip
+
+        self.lock = threading.Lock()
+        self.running = False
+        self.thread = None
+        self.cap = None
+
+        self.latest_frame = None
+        self.person_count = 0
+        self.fire_spotted = False
+
+    def start(self):
+        if self.running and self.thread and self.thread.is_alive():
+            return
+        self.running = True
+        self.thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+        if self.thread and self.thread.is_alive() and self.thread != threading.current_thread():
+            self.thread.join(timeout=1.0)
+        self.thread = None
+
+    def _worker_loop(self):
+        try:
+            self.cap = cv2.VideoCapture(self.ip_url)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception as e:
+            print(f"Failed to open video source: {e}")
+            self.running = False
+            return
+
+        count = 0
+        while self.running and self.cap is not None and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if not ret:
+                time.sleep(0.04)
+                continue
+
+            count += 1
+            if count % self.frame_skip == 0:
+                try:
+                    # Engine 1: Custom Fire / Smoke model
+                    fire_results = self.fire_model(frame, conf=self.fire_conf)
+                    annotated_frame = fire_results[0].plot()
+                    annotated_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+
+                    # CCTV Timestamp Overlay
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cctv_text = f"REC | CAM 01 | {now_str}"
+                    cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 4, cv2.LINE_AA)
+                    cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
+
+                    # Engine 2: Base model for crowd counting
+                    base_results = self.base_model(frame)
+                    p_count = sum(
+                        1 for box in base_results[0].boxes
+                        if self.base_model.names[int(box.cls[0])] == 'person'
+                    )
+
+                    fire_found = any(
+                        self.fire_model.names[int(b.cls[0])].lower() in ('fire', 'smoke', '火', '烟')
+                        for b in fire_results[0].boxes
+                    )
+
+                    with self.lock:
+                        self.latest_frame = annotated_rgb
+                        self.person_count = p_count
+                        self.fire_spotted = fire_found
+                except Exception as e:
+                    print(f"Inference error in worker: {e}")
+            else:
+                time.sleep(0.005)
+
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
 
 # ---------------------------------------------------------
 # --- EMAIL ALERT SYSTEM (BACKGROUND THREADING) ---
@@ -486,16 +637,15 @@ with st.sidebar:
           <span class="sb-rs" style="color:{s_color};">{dot_html}{s_text}</span>
         </div>""", unsafe_allow_html=True)
 
-    # ─── UPDATED:  EDGE-TTS ───
     st.markdown('<div class="sb-lbl">▸ System Info</div>', unsafe_allow_html=True)
-    st.markdown("""
+    st.markdown(f"""
     <div class="sysinfo">
     LOCATION &nbsp;&nbsp; : MIET CAMPUS<br>
     AI ENGINES : TWIN (FIRE + CROWD)<br>
     TTS ENGINE : EDGE-TTS (HINDI NEURAL)<br>
     LANGUAGE &nbsp;&nbsp; : HI-IN<br>
-    FRAME SKIP : 4 FRAMES<br>
-    CROWD LIM &nbsp;: 10 PERSONS<br>
+    FRAME SKIP : {FRAME_SKIP} FRAMES<br>
+    CROWD LIM &nbsp;: {CROWD_THRESHOLD} PERSONS<br>
     </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -547,9 +697,6 @@ live_badge = '<span class="badge-live"><span class="dot dot-r" style="width:6px;
 stdby_badge = '<span class="badge-stdby">● STDBY</span>'
 
 col1, col2 = st.columns(2)
-
-metric_cpu    = None
-feed_01_frame = None
 
 with col1:
     hdr_cls = "cam-hdr live" if armed else "cam-hdr"
@@ -645,66 +792,70 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LIVE LOGIC LOOP
+# NON-BLOCKING MONITORING & ALERT DISPATCH
 # ─────────────────────────────────────────────────────────────────────────────
-if st.session_state.system_armed:
-    cap = cv2.VideoCapture(ip_url)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-    count      = 0
-    frame_skip = 4
-
-    while cap.isOpened() and st.session_state.system_armed:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        count += 1
-
-        if count % frame_skip == 0:
-            # Engine 1: Custom Fire / Smoke model
-            fire_results    = fire_model(frame, conf=0.68)
-            annotated_frame = fire_results[0].plot()
-            annotated_rgb   = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-
-            # REAL-TIME CCTV TIMESTAMP
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cctv_text = f"REC | CAM 01 | {now}"
-            
-            cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 4, cv2.LINE_AA)
-            cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
-
-            # Engine 2: Base model for crowd counting
-            base_results = base_model(frame)
-            person_count = sum(
-                1 for box in base_results[0].boxes
-                if base_model.names[int(box.cls[0])] == 'person'
+def update_live_monitoring():
+    if not st.session_state.system_armed:
+        if st.session_state.get('camera_worker') is not None:
+            st.session_state.camera_worker.stop()
+            st.session_state.camera_worker = None
+        if st.session_state.do_clear_alert:
+            alert_pos.empty()
+            audio_pos.empty()
+            metric_cpu.markdown(
+                '<div class="mstrip"><span class="ml">Crowd Count</span>'
+                '<span class="mv off">—</span></div>',
+                unsafe_allow_html=True
             )
+            feed_01_frame.image(create_placeholder("CAM 01"), use_container_width=True)
+            st.session_state.do_clear_alert = False
+        return
 
-            # Update metric strip
-            if metric_cpu is not None:
-                metric_cpu.markdown(
-                    f'<div class="mstrip">'
-                    f'<span class="ml">Crowd Count</span>'
-                    f'<span class="mv">👥 {person_count}</span>'
-                    f'</div>',
-                    unsafe_allow_html=True
-                )
+    # When armed, ensure background worker is running for the given ip_url
+    worker = st.session_state.get('camera_worker')
+    if worker is None or not worker.running or worker.ip_url != ip_url:
+        if worker is not None:
+            worker.stop()
+        worker = CameraWorker(
+            ip_url=ip_url,
+            fire_mod=fire_model,
+            base_mod=base_model,
+            fire_conf=FIRE_CONF_THRESHOLD,
+            crowd_thresh=CROWD_THRESHOLD,
+            frame_skip=FRAME_SKIP
+        )
+        st.session_state.camera_worker = worker
+        worker.start()
 
-            # Update live camera feed
-            if feed_01_frame is not None:
-                feed_01_frame.image(annotated_rgb, channels="RGB", use_container_width=True)
+    # Read latest inference frame and values from worker
+    with worker.lock:
+        frame = worker.latest_frame
+        person_count = worker.person_count
+        fire_spotted = worker.fire_spotted
 
-            # ── FIRE / SMOKE ALERT ──
-            # for Chinese ('火', '烟') and English ('fire', 'smoke') it will handle both cases
-            fire_spotted = any(
-                fire_model.names[int(b.cls[0])].lower() in ('fire', 'smoke', '火', '烟')
-                for b in fire_results[0].boxes
-            )
+    if frame is not None:
+        feed_01_frame.image(frame, channels="RGB", use_container_width=True)
+        metric_cpu.markdown(
+            f'<div class="mstrip"><span class="ml">Crowd Count</span>'
+            f'<span class="mv">👥 {person_count}</span></div>',
+            unsafe_allow_html=True
+        )
 
-            # ── 2. OVERCROWDING ALERT (Latest Override) ──
-            CROWD_THRESHOLD = 5  
+    # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins") ──
+    now = time.time()
+    if fire_spotted:
+        # Trigger only if no Fire Alert is currently active (Fire Alert overrides Crowd Alert)
+        if st.session_state.get("active_alert") != "FIRE":
+            alert_pos.markdown("""
+            <div class="a-fire">
+              <span class="a-ico">🔥</span>
+              <div>
+                <div class="a-ttl">Fire / Smoke Hazard Detected — CAM 01</div>
+                <div class="a-msg">MIET Main Gate · High-confidence AI detection · Fire Safety Team Dispatched</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
 
+<<<<<<< HEAD
             # ── 1. FIRE / SMOKE ALERT ──
             if fire_spotted:
                 # Trigger only if no Fire Alert is currently active (Fire Alert overrides Crowd Alert).
@@ -754,5 +905,55 @@ if st.session_state.system_armed:
             # ── 3. RESET (if no alerts are detected) ──
             else:
                 st.session_state.active_alert = None
+=======
+            last_audio = st.session_state.last_audio_ts.get("FIRE", 0.0)
+            if now - last_audio > AUDIO_COOLDOWN_SEC:
+                trigger_hindi_alert("कृपया ध्यान दें। मेन गेट पर आग डिटेक्ट हुई है। तुरंत फायर सेफ्टी टीम डिस्पैच करें।")
+                st.session_state.last_audio_ts["FIRE"] = now
 
-    cap.release()
+            email_alerter.send_alert("FIRE")
+>>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
+
+            st.session_state.active_alert = "FIRE"
+
+    elif person_count > CROWD_THRESHOLD:
+        # Trigger only if no Crowd Alert is currently active
+        if st.session_state.get("active_alert") != "CROWD":
+            alert_pos.markdown(f"""
+            <div class="a-crwd">
+              <span class="a-ico">🚨</span>
+              <div>
+                <div class="a-ttl">Overcrowding Detected — CAM 01</div>
+                <div class="a-msg">MIET Main Gate · Live Count: {person_count} persons · Security Team Dispatch Triggered</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            last_audio = st.session_state.last_audio_ts.get("CROWD", 0.0)
+            if now - last_audio > AUDIO_COOLDOWN_SEC:
+                trigger_hindi_alert("कृपया ध्यान दें। मेन गेट एंट्रेंस पर ओवरक्राउडिंग डिटेक्ट हुई है। तुरंत सिक्योरिटी स्टाफ डिस्पैच करें।")
+                st.session_state.last_audio_ts["CROWD"] = now
+
+            email_alerter.send_alert("CROWD", person_count)
+
+            st.session_state.active_alert = "CROWD"
+
+    else:
+        # Reset alert display if hazards have cleared
+        if st.session_state.get("active_alert") is not None:
+            alert_pos.empty()
+            audio_pos.empty()
+            st.session_state.active_alert = None
+
+
+# Streamlit non-blocking live update mechanism
+if hasattr(st, "fragment"):
+    @st.fragment(run_every=0.5)
+    def live_monitoring_fragment():
+        update_live_monitoring()
+
+    live_monitoring_fragment()
+else:
+    update_live_monitoring()
+    if st.session_state.system_armed:
+        time.sleep(0.5)
+        st.rerun()
