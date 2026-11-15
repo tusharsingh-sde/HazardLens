@@ -31,11 +31,15 @@ email_alerter = get_email_alerter()
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-FIRE_CONF_THRESHOLD = 0.68
-CROWD_THRESHOLD     = 5
-FRAME_SKIP          = 4
-EMAIL_COOLDOWN_SEC  = 120
-AUDIO_COOLDOWN_SEC  = 120
+FIRE_CONF_THRESHOLD   = 0.68
+CROWD_THRESHOLD       = 5
+FRAME_SKIP            = 4
+EMAIL_COOLDOWN_SEC    = 120
+AUDIO_COOLDOWN_SEC    = 120
+ALERT_CLEAR_GRACE_SEC = 3.0  # Debounce: delay clearing alerts by 3s to prevent visual banner flicker
+
+# Thread-safety lock for YOLO / PyTorch model inference across threads
+model_inference_lock = threading.Lock()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -48,7 +52,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GLOBAL CSS — Clean IBM Plex Command-Center Aesthetic
+# GLOBAL CSS
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -343,6 +347,7 @@ if 'audio_loop'       not in st.session_state: st.session_state.audio_loop      
 if 'system_armed'     not in st.session_state: st.session_state.system_armed     = False
 if 'do_clear_alert'   not in st.session_state: st.session_state.do_clear_alert   = False
 if 'active_alert'     not in st.session_state: st.session_state.active_alert     = None
+if 'hazard_clear_ts'  not in st.session_state: st.session_state.hazard_clear_ts  = None
 if 'last_audio_ts'    not in st.session_state: st.session_state.last_audio_ts    = {"FIRE": 0.0, "CROWD": 0.0}
 if 'camera_worker'    not in st.session_state: st.session_state.camera_worker    = None
 
@@ -369,11 +374,13 @@ def silence_alerts():
     st.session_state.crowd_alert_sent = False
     st.session_state.do_clear_alert   = True
     st.session_state.active_alert     = None
+    st.session_state.hazard_clear_ts  = None
 
 def disarm_system():
-    st.session_state.system_armed   = False
-    st.session_state.do_clear_alert = True
-    st.session_state.active_alert   = None
+    st.session_state.system_armed    = False
+    st.session_state.do_clear_alert  = True
+    st.session_state.active_alert    = None
+    st.session_state.hazard_clear_ts = None
     if st.session_state.get('camera_worker') is not None:
         st.session_state.camera_worker.stop()
         st.session_state.camera_worker = None
@@ -496,37 +503,53 @@ class CameraWorker:
             return
 
         count = 0
+        failed_reads = 0
         while self.running and self.cap is not None and self.cap.isOpened():
             ret, frame = self.cap.read()
             if not ret:
+                failed_reads += 1
                 time.sleep(0.04)
+                if failed_reads >= 30:  # ~1.2s stream drop: auto-reconnect
+                    try:
+                        self.cap.release()
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
+                    try:
+                        self.cap = cv2.VideoCapture(self.ip_url)
+                        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        failed_reads = 0
+                    except Exception as e:
+                        print(f"Reconnection attempt failed: {e}")
                 continue
 
+            failed_reads = 0
             count += 1
             if count % self.frame_skip == 0:
                 try:
-                    # Engine 1: Custom Fire / Smoke model
-                    fire_results = self.fire_model(frame, conf=self.fire_conf)
-                    annotated_frame = fire_results[0].plot()
-                    annotated_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                    with model_inference_lock:
+                        # Engine 1: Custom Fire / Smoke model (imgsz=416, verbose=False for fast edge inference)
+                        fire_results = self.fire_model(frame, conf=self.fire_conf, imgsz=416, verbose=False)
+                        annotated_frame = fire_results[0].plot()
+                        annotated_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
 
-                    # CCTV Timestamp Overlay
-                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cctv_text = f"REC · CAM 01 · {now_str}"
-                    cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (0, 0, 0), 4, cv2.LINE_AA)
-                    cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (60, 200, 232), 2, cv2.LINE_AA)
+                        # CCTV Timestamp Overlay
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        cctv_text = f"REC · CAM 01 · {now_str}"
+                        cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (0, 0, 0), 4, cv2.LINE_AA)
+                        cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (60, 200, 232), 2, cv2.LINE_AA)
 
-                    # Engine 2: Base model for crowd counting
-                    base_results = self.base_model(frame)
-                    p_count = sum(
-                        1 for box in base_results[0].boxes
-                        if self.base_model.names[int(box.cls[0])] == 'person'
-                    )
+                        # Engine 2: Base model for crowd counting (imgsz=416, verbose=False)
+                        base_results = self.base_model(frame, imgsz=416, verbose=False)
+                        p_count = sum(
+                            1 for box in base_results[0].boxes
+                            if self.base_model.names[int(box.cls[0])] == 'person'
+                        )
 
-                    fire_found = any(
-                        self.fire_model.names[int(b.cls[0])].lower() in ('fire', 'smoke', '火', '烟')
-                        for b in fire_results[0].boxes
-                    )
+                        fire_found = any(
+                            self.fire_model.names[int(b.cls[0])].lower() in ('fire', 'smoke', '火', '烟')
+                            for b in fire_results[0].boxes
+                        )
 
                     with self.lock:
                         self.latest_frame = annotated_rgb
@@ -808,9 +831,10 @@ def update_live_monitoring():
             unsafe_allow_html=True
         )
 
-    # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins") ──
+    # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins" + Debounced Clearing) ──
     now = time.time()
     if fire_spotted:
+        st.session_state.hazard_clear_ts = None
         # Fire alert overrides Crowd alert
         if st.session_state.get("active_alert") != "FIRE":
             alert_pos.markdown("""
@@ -841,6 +865,7 @@ def update_live_monitoring():
             st.session_state.active_alert = "FIRE"
 
     elif person_count > CROWD_THRESHOLD:
+        st.session_state.hazard_clear_ts = None
         # Trigger only if no Crowd Alert is currently active
         if st.session_state.get("active_alert") != "CROWD":
             alert_pos.markdown(f"""
@@ -872,11 +897,15 @@ def update_live_monitoring():
             st.session_state.active_alert = "CROWD"
 
     else:
-        # Reset alert display if hazards have cleared
+        # Reset alert display if hazards have cleared (debounced with grace period to prevent flickering)
         if st.session_state.get("active_alert") is not None:
-            alert_pos.empty()
-            audio_pos.empty()
-            st.session_state.active_alert = None
+            if st.session_state.hazard_clear_ts is None:
+                st.session_state.hazard_clear_ts = now
+            elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
+                alert_pos.empty()
+                audio_pos.empty()
+                st.session_state.active_alert = None
+                st.session_state.hazard_clear_ts = None
 
 
 # Streamlit non-blocking live update mechanism
