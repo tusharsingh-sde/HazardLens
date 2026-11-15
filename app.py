@@ -835,10 +835,17 @@ def update_live_monitoring():
         # Operator has silenced alerts: clear active banners and suppress audio & email dispatches
         alert_pos.empty()
         audio_pos.empty()
-        # If the hazard clears completely while silenced, auto-reset silence early
+        # Debounced Auto-Release: Require sustained absence of hazards for ALERT_CLEAR_GRACE_SEC (3.0s)
+        # before releasing silence early. Prevents single-frame YOLO misses from breaking silence prematurely.
         if not fire_spotted and person_count <= CROWD_THRESHOLD:
-            st.session_state.silenced_until  = 0.0
-            st.session_state.active_alert    = None
+            if st.session_state.hazard_clear_ts is None:
+                st.session_state.hazard_clear_ts = now
+            elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
+                st.session_state.silenced_until  = 0.0
+                st.session_state.active_alert    = None
+                st.session_state.hazard_clear_ts = None
+        else:
+            # Hazard is still actively observed in this frame; reset clear timer to keep silence protected
             st.session_state.hazard_clear_ts = None
         return
 
