@@ -7,14 +7,6 @@ from datetime import datetime
 import edge_tts
 import asyncio
 import os
-<<<<<<< HEAD
-
-# ── EMAIL IMPORTS ADDED ──
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-import threading
-=======
 import hashlib
 import time
 import threading
@@ -44,7 +36,6 @@ CROWD_THRESHOLD     = 5
 FRAME_SKIP          = 4
 EMAIL_COOLDOWN_SEC  = 120
 AUDIO_COOLDOWN_SEC  = 120
->>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -57,233 +48,288 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GLOBAL CSS — Tactical Command-Center Aesthetic
+# GLOBAL CSS — Clean IBM Plex Command-Center Aesthetic
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Inter:wght@300;400;500&family=Share+Tech+Mono&display=swap');  
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
 
 :root {
-  --bg:     #050A0F;
-  --surf:   #091420;
-  --card:   #0C1B28;
-  --cyan:   #00E5FF;
-  --red:    #FF3A3A;
-  --amber:  #FFB800;
-  --green:  #39FF14;
-  --border: #14253A;
-  --text:   #DCE8F0;
-  --muted:  #4A6880;
-  --label:  #7899B8;
-  --d: 'Rajdhani', sans-serif;
-  --b: 'Inter', sans-serif;
-  --m: 'Share Tech Mono', monospace;
+  --bg:    #0B0F14;
+  --s1:    #111820;
+  --s2:    #17212C;
+  --line:  #1F2B38;
+  --line2: #2D3C4D;
+  --text:  #E6EDF3;
+  --text2: #A3B3C2;
+  --mute:  #7B8DA0;
+  --acc:   #3CC8E8;
+  --crit:  #FF5C4D;
+  --warn:  #F2B33D;
+  --ok:    #3DD68C;
+  --mono:  'IBM Plex Mono', ui-monospace, monospace;
+  --sans:  'IBM Plex Sans', system-ui, sans-serif;
+  --cond:  'IBM Plex Sans Condensed', 'IBM Plex Sans', sans-serif;
 }
 
 /* ── BASE ── */
-.stApp, .main  { background: var(--bg) !important; }
+.stApp, .main { background: var(--bg) !important; color: var(--text) !important; }
 #MainMenu, footer { visibility: hidden !important; }
 *, *::before, *::after { box-sizing: border-box; }
 div.block-container { padding-top: 1rem !important; padding-bottom: 1rem !important; }
 
 /* ── SIDEBAR ── */
 section[data-testid="stSidebar"] {
-  background: #03090F !important;
-  border-right: 1px solid var(--border) !important;
+  background: var(--s1) !important;
+  border-right: 1px solid var(--line) !important;
 }
 
 /* ── HEADER ── */
 .hz-hdr {
-  background: linear-gradient(112deg, #070F18 0%, #0B1928 100%);
-  border: 1px solid var(--border);
-  border-left: 4px solid var(--cyan);
-  border-radius: 6px;
-  padding: 18px 24px;
-  margin-bottom: 10px;
-  display: flex; align-items: center; justify-content: space-between;
-  position: relative; overflow: hidden;
-}
-.hz-hdr::before {
-  content: '';
-  position: absolute; top: 0; left: 0; right: 0; height: 1px;
-  background: linear-gradient(90deg, transparent 0%, rgba(0,229,255,.45) 50%, transparent 100%);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 28px;
+  padding: 10px 24px;
+  background: var(--s1);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin-bottom: 12px;
 }
 .hz-brand {
-  font-family: var(--d);
-  font-size: 2rem; font-weight: 700;
-  color: var(--text); letter-spacing: 5px; line-height: 1;
-  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
-.hz-brand em { color: var(--cyan); font-style: normal; }
-.hz-sub { font-family: var(--m); font-size: 0.6rem; color: var(--muted); letter-spacing: 4px; margin-top: 5px; }
-.hz-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.hz-logo { flex: 0 0 auto; }
+.hz-name {
+  font: 600 20px/1 var(--cond);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.hz-name em { color: var(--acc); font-style: normal; }
+.hz-sub {
+  font: 500 11px/1.2 var(--mono);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--mute);
+  margin-top: 3px;
+}
+.hz-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-left: auto; }
 
 .stat-pill {
-  background: #03080E; border: 1px solid var(--border);
-  border-radius: 4px; padding: 7px 14px; text-align: center; min-width: 72px;
+  background: var(--s2);
+  border: 1px solid var(--line2);
+  border-radius: 3px;
+  padding: 6px 14px;
+  text-align: center;
+  min-width: 72px;
 }
-.stat-v { display: block; font-family: var(--m); font-size: 1.1rem; color: var(--cyan); line-height: 1.2; }
-.stat-l { font-family: var(--b); font-size: 0.5rem; color: var(--muted); letter-spacing: 2.5px; text-transform: uppercase; }
+.stat-v { display: block; font: 500 20px/1 var(--mono); color: var(--acc); }
+.stat-l { font: 500 11px/1.2 var(--mono); color: var(--mute); letter-spacing: .1em; text-transform: uppercase; }
 
-.arm-on  {
-  display: inline-flex; align-items: center; gap: 9px;
-  background: #040F04; border: 1px solid var(--green); border-radius: 4px;
-  padding: 9px 18px; font-family: var(--d); font-size: 0.85rem;
-  font-weight: 700; color: var(--green); letter-spacing: 3px; text-transform: uppercase;
+.arm-on {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 44px; padding: 0 18px;
+  border: 1px solid var(--ok); border-radius: 3px;
+  background: rgba(61,214,140,.08);
+  font: 600 13px var(--sans); color: var(--ok);
+  letter-spacing: .02em;
 }
 .arm-off {
-  display: inline-flex; align-items: center; gap: 9px;
-  background: #100F04; border: 1px solid #1E1E08; border-radius: 4px;
-  padding: 9px 18px; font-family: var(--d); font-size: 0.85rem;
-  font-weight: 700; color: #36361A; letter-spacing: 3px; text-transform: uppercase;
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 44px; padding: 0 18px;
+  border: 1px solid var(--line2); border-radius: 3px;
+  background: var(--s2);
+  font: 600 13px var(--sans); color: var(--mute);
+  letter-spacing: .02em;
 }
 
 /* PULSING DOTS */
-@keyframes blink { 0%,100%{opacity:1;} 50%{opacity:.08;} }
-@keyframes blink-fast { 0%,100%{opacity:1;} 50%{opacity:.1;} }
-.dot { width:9px; height:9px; border-radius:50%; display:inline-block; flex-shrink:0; animation: blink 1.3s ease-in-out infinite; }
-.dot-g { background: var(--green); box-shadow: 0 0 7px var(--green); }
-.dot-a { background: var(--amber); box-shadow: 0 0 7px var(--amber); }
-.dot-r { background: var(--red);   box-shadow: 0 0 7px var(--red);   animation: blink-fast .7s ease-in-out infinite; }
+@keyframes hzPulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+@keyframes hzPulseFast { 0%,100%{opacity:1} 50%{opacity:.1} }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.dot-g { background: var(--ok);   animation: hzPulse 1.4s ease-in-out infinite; }
+.dot-a { background: var(--warn); animation: hzPulse 1.4s ease-in-out infinite; }
+.dot-r { background: var(--crit); animation: hzPulseFast .7s ease-in-out infinite; }
 
 /* ── ALERT BANNERS ── */
-@keyframes si   { from{transform:translateY(-8px);opacity:0;} to{transform:translateY(0);opacity:1;} }
-@keyframes f-r  { 0%,100%{border-color:var(--red);  box-shadow:0 0 16px rgba(255,58,58,.18);}  50%{box-shadow:0 0 34px rgba(255,58,58,.38);  border-color:rgba(255,58,58,.55);} }
-@keyframes f-a  { 0%,100%{border-color:var(--amber);box-shadow:0 0 16px rgba(255,184,0,.18);} 50%{box-shadow:0 0 34px rgba(255,184,0,.38); border-color:rgba(255,184,0,.55);} }
+@keyframes si { from{transform:translateY(-6px);opacity:0;} to{transform:translateY(0);opacity:1;} }
 
 .a-fire {
-  background: linear-gradient(135deg, #140303, #1B0505);
-  border: 1px solid var(--red); border-radius: 5px;
-  padding: 14px 18px; display: flex; align-items: center; gap: 14px; margin: 6px 0;
-  animation: si .3s ease, f-r 1.5s ease-in-out infinite;
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 16px 28px; padding: 16px 24px; margin: 6px 0;
+  background: rgba(255,92,77,.08);
+  border: 1px solid var(--crit);
+  border-radius: 4px;
+  animation: si .25s ease;
 }
 .a-crwd {
-  background: linear-gradient(135deg, #130D00, #191100);
-  border: 1px solid var(--amber); border-radius: 5px;
-  padding: 14px 18px; display: flex; align-items: center; gap: 14px; margin: 6px 0;
-  animation: si .3s ease, f-a 1.5s ease-in-out infinite;
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 16px 28px; padding: 16px 24px; margin: 6px 0;
+  background: rgba(242,179,61,.08);
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  animation: si .25s ease;
 }
-.a-ico  { font-size: 1.8rem; flex-shrink: 0; }
-.a-ttl  { font-family: var(--d); font-size: 1rem; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; }
-.a-msg  { font-family: var(--b); font-size: 0.72rem; margin-top: 2px; opacity: .85; }
-.a-fire .a-ttl { color: var(--red);   } .a-fire .a-msg { color: #FFA5A5; }
-.a-crwd .a-ttl { color: var(--amber); } .a-crwd .a-msg { color: #FFD888; }
+.a-ico-wrap {
+  flex: 0 0 auto; width: 48px; height: 48px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid currentColor; border-radius: 2px;
+}
+.a-fire .a-ico-wrap { color: var(--crit); }
+.a-crwd .a-ico-wrap { color: var(--warn); }
+.a-kicker {
+  font: 500 11px/1.2 var(--mono);
+  letter-spacing: .12em; text-transform: uppercase;
+}
+.a-fire .a-kicker { color: var(--crit); }
+.a-crwd .a-kicker { color: var(--warn); }
+.a-ttl {
+  margin-top: 4px;
+  font: 600 20px/1.15 var(--cond);
+  letter-spacing: .01em;
+  color: var(--text);
+}
+.a-msg { margin-top: 4px; font-size: 13px; color: var(--text2); }
 
-/* ── SECTION DIVIDER ── */
-.sdiv { display: flex; align-items: center; gap: 12px; margin: 10px 0 8px; }
-.sdiv::before,.sdiv::after { content: ''; flex: 1; height: 1px; background: var(--border); }
-.sdiv-t { font-family: var(--m); font-size: 0.57rem; color: var(--muted); letter-spacing: 3px; white-space: nowrap; text-transform: uppercase; }
+/* ── SECTION LABEL ── */
+.sec-lbl {
+  font: 500 11px/1.2 var(--mono);
+  letter-spacing: .1em; text-transform: uppercase;
+  color: var(--mute);
+  margin: 14px 0 8px;
+  display: flex; align-items: center; gap: 10px;
+}
+.sec-lbl::after { content:''; flex:1; height:1px; background: var(--line); }
 
 /* ── CAMERA CARD HEADER ── */
 .cam-hdr {
-  background: #04090F;
-  border: 1px solid var(--border); border-bottom: none;
-  border-radius: 5px 5px 0 0;
-  padding: 10px 14px; margin-bottom: 0;
-  display: flex; align-items: center; justify-content: space-between;
+  background: var(--s2);
+  border: 1px solid var(--line); border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  padding: 10px 16px;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
 }
-.cam-hdr.live { border-color: var(--cyan); }
-.cam-nm  { font-family: var(--d); font-size: 0.85rem; font-weight: 600; color: var(--text); letter-spacing: 1.5px; text-transform: uppercase; }
-.cam-loc { font-family: var(--m); font-size: 0.57rem; color: var(--muted); letter-spacing: 1.5px; margin-top: 2px; }
+.cam-hdr.live { border-color: var(--acc); }
+.cam-nm  { font: 500 12px/1.2 var(--mono); letter-spacing: .1em; color: var(--acc); }
+.cam-loc { margin-top: 2px; font: 500 13px/1.2 var(--sans); color: var(--text); }
 
-.badge-live  { display: inline-flex; align-items: center; gap: 5px; background: #090404; border: 1px solid #9A0000; border-radius: 3px; padding: 3px 9px; font-family: var(--m); font-size: 0.57rem; color: #FF5555; letter-spacing: 1px; }
-.badge-stdby { display: inline-flex; align-items: center; gap: 5px; background: #0A0A0A; border: 1px solid #182030; border-radius: 3px; padding: 3px 9px; font-family: var(--m); font-size: 0.57rem; color: var(--muted); letter-spacing: 1px; }
+.badge-live  {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px;
+  border: 1px solid var(--crit); border-radius: 3px;
+  font: 500 11px/1 var(--mono); color: var(--crit); letter-spacing: .1em;
+}
+.badge-stdby {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px;
+  border: 1px solid var(--line2); border-radius: 3px;
+  font: 500 11px/1 var(--mono); color: var(--mute); letter-spacing: .08em;
+}
 
 /* ── METRIC STRIP ── */
 .mstrip {
-  background: #03080D; border: 1px solid var(--border); border-top: none; border-bottom: none;
-  padding: 7px 14px; display: flex; align-items: center; justify-content: space-between;
+  background: var(--s2); border: 1px solid var(--line); border-top: none; border-bottom: none;
+  padding: 8px 16px; display: flex; align-items: center; justify-content: space-between;
 }
-.mstrip .ml { font-family: var(--m); font-size: 0.57rem; color: var(--muted); letter-spacing: 2px; text-transform: uppercase; }
-.mstrip .mv { font-family: var(--m); font-size: 0.88rem; color: var(--cyan); font-weight: bold; }
-.mstrip .mv.off { color: var(--muted); }
+.mstrip .ml { font: 500 11px/1.2 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--mute); }
+.mstrip .mv { font: 500 20px/1 var(--mono); color: var(--acc); }
+.mstrip .mv.off { color: var(--mute); font-size: 15px; }
 
-/* ── IMAGE — connects to card header and metric strip ── */
+/* ── IMAGE ── */
 div[data-testid="stImage"] { margin: 0 !important; padding: 0 !important; position: relative; }
 div[data-testid="stImage"] img {
   display: block; width: 100%;
-  border: 1px solid var(--border); border-top: none; border-radius: 0;
+  border: 1px solid var(--line); border-top: none; border-radius: 0;
 }
-
-/* ── CRT Scanline Overlay ── */
 div[data-testid="stImage"]::after {
   content: '';
   position: absolute; inset: 0;
-  background: repeating-linear-gradient(
-    0deg,
-    transparent, transparent 2px,
-    rgba(0, 229, 255, 0.013) 2px, rgba(0, 229, 255, 0.013) 4px
-  );
+  background: repeating-linear-gradient(0deg, rgba(255,255,255,.018) 0 1px, transparent 1px 3px);
   pointer-events: none; z-index: 5;
 }
 
 /* ── BUTTONS ── */
 div[data-testid="stButton"] > button {
-  font-family: var(--d) !important;
-  font-size: 0.7rem !important; font-weight: 600 !important;
-  letter-spacing: 1.5px !important; text-transform: uppercase !important;
+  font-family: var(--sans) !important;
+  font-size: 13px !important; font-weight: 600 !important;
+  letter-spacing: .02em !important;
   border-radius: 0 0 4px 4px !important;
-  border: 1px solid var(--border) !important; border-top: none !important;
+  border: 1px solid var(--line) !important; border-top: none !important;
   width: 100% !important;
-  background: #030810 !important; color: var(--label) !important;
-  padding: 9px 12px !important; transition: all .2s ease !important;
+  background: var(--s2) !important; color: var(--text2) !important;
+  padding: 10px 12px !important; transition: all .15s ease !important;
 }
 div[data-testid="stButton"] > button:hover {
-  background: #07131E !important; color: var(--cyan) !important;
-  border-color: var(--cyan) !important;
+  background: var(--s1) !important; color: var(--acc) !important;
+  border-color: var(--acc) !important;
 }
 
 /* ── TEXT INPUT ── */
 div[data-testid="stTextInput"] input {
-  background: #03080D !important; border: 1px solid var(--border) !important;
-  color: var(--cyan) !important; font-family: var(--m) !important;
-  font-size: 0.77rem !important; letter-spacing: 1px !important; border-radius: 3px !important;
+  background: var(--s2) !important; border: 1px solid var(--line) !important;
+  color: var(--acc) !important; font: 400 13px var(--mono) !important;
+  letter-spacing: .04em !important; border-radius: 3px !important;
 }
 div[data-testid="stTextInput"] input:focus {
-  border-color: var(--cyan) !important; box-shadow: 0 0 0 1px rgba(0,229,255,.28) !important;
+  border-color: var(--acc) !important; box-shadow: 0 0 0 1px rgba(60,200,232,.25) !important;
 }
 div[data-testid="stTextInput"] label {
-  font-family: var(--m) !important; font-size: 0.57rem !important;
-  color: var(--muted) !important; letter-spacing: 3px !important; text-transform: uppercase !important;
+  font: 500 11px var(--mono) !important;
+  color: var(--mute) !important; letter-spacing: .1em !important; text-transform: uppercase !important;
 }
 
 /* ── SIDEBAR COMPONENTS ── */
-.sb-title { font-family: var(--d); font-size: 1.1rem; font-weight: 700; color: var(--cyan); letter-spacing: 4px; padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--border); text-transform: uppercase; }
-.sb-lbl   { font-family: var(--m); font-size: 0.55rem; color: var(--muted); letter-spacing: 3px; text-transform: uppercase; padding: 12px 0 7px; }
-.sb-row   { display: flex; justify-content: space-between; align-items: center; padding: 7px 10px; margin: 3px 0; background: #060C14; border: 1px solid var(--border); border-radius: 3px; }
-.sb-rn    { font-family: var(--d); font-size: 0.78rem; font-weight: 600; color: var(--label); }
-.sb-rloc  { font-family: var(--m); font-size: 0.55rem; color: var(--muted); letter-spacing: 1px; margin-top: 1px; }
-.sb-rs    { font-family: var(--m); font-size: 0.57rem; }
-.sysinfo  { font-family: var(--m); font-size: 0.62rem; color: var(--muted); line-height: 2.1; padding: 10px 12px; background: #060C14; border: 1px solid var(--border); border-radius: 3px; }
+.sb-title {
+  font: 600 15px/1.2 var(--cond); color: var(--acc); letter-spacing: .06em;
+  text-transform: uppercase; padding-bottom: 12px; margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.sb-lbl { font: 500 11px/1.2 var(--mono); color: var(--mute); letter-spacing: .1em; text-transform: uppercase; padding: 12px 0 7px; }
+.sb-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; margin: 3px 0;
+  background: var(--s2); border: 1px solid var(--line); border-radius: 3px;
+}
+.sb-rn    { font: 500 13px var(--sans); color: var(--text); }
+.sb-rloc  { font: 400 12px var(--mono); color: var(--mute); letter-spacing: .04em; margin-top: 2px; }
+.sb-rs    { font: 500 11px var(--mono); letter-spacing: .08em; }
+.sysinfo  {
+  font: 400 12px/2 var(--mono); color: var(--mute);
+  padding: 10px 14px; background: var(--s2); border: 1px solid var(--line); border-radius: 3px;
+}
 
 /* ── FOOTER STATUS BAR ── */
 .ftr {
-  background: #03080D; border: 1px solid var(--border); border-top-color: var(--cyan);
-  border-radius: 4px; padding: 8px 18px; margin-top: 16px;
-  display: flex; justify-content: space-between; align-items: center;
-  font-family: var(--m); font-size: 0.57rem; color: var(--muted); letter-spacing: 1px;
-  flex-wrap: wrap; gap: 6px;
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px;
+  padding: 12px 24px; margin-top: 16px;
+  border-top: 1px solid var(--line); border: 1px solid var(--line);
+  background: var(--s1); border-radius: 4px;
+  font: 400 11px/1.4 var(--mono); letter-spacing: .06em; color: var(--mute);
 }
-.ftr .online { color: var(--green); }
+.ftr .online { color: var(--ok); }
 
 /* ── TOAST ── */
 div[data-testid="stToast"] {
-  background: #041004 !important; border: 1px solid var(--green) !important;
-  color: var(--green) !important; font-family: var(--b) !important;
+  background: rgba(61,214,140,.08) !important; border: 1px solid var(--ok) !important;
+  color: var(--ok) !important; font-family: var(--sans) !important;
 }
 
 /* ── SCROLLBAR ── */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 2px; }
 
+/* Sidebar buttons — no bottom-only radius */
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
   border-radius: 3px !important;
-  border: 1px solid var(--border) !important;
-  border-top: 1px solid var(--border) !important;
+  border: 1px solid var(--line) !important;
+  border-top: 1px solid var(--line) !important;
 }
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
-  border-color: var(--cyan) !important;
+  border-color: var(--acc) !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -297,11 +343,8 @@ if 'audio_loop'       not in st.session_state: st.session_state.audio_loop      
 if 'system_armed'     not in st.session_state: st.session_state.system_armed     = False
 if 'do_clear_alert'   not in st.session_state: st.session_state.do_clear_alert   = False
 if 'active_alert'     not in st.session_state: st.session_state.active_alert     = None
-<<<<<<< HEAD
-=======
 if 'last_audio_ts'    not in st.session_state: st.session_state.last_audio_ts    = {"FIRE": 0.0, "CROWD": 0.0}
 if 'camera_worker'    not in st.session_state: st.session_state.camera_worker    = None
->>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL LOADING  (cached for zero-lag reloads)
@@ -331,12 +374,9 @@ def disarm_system():
     st.session_state.system_armed   = False
     st.session_state.do_clear_alert = True
     st.session_state.active_alert   = None
-<<<<<<< HEAD
-=======
     if st.session_state.get('camera_worker') is not None:
         st.session_state.camera_worker.stop()
         st.session_state.camera_worker = None
->>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 
 def arm_system():
     st.session_state.system_armed = True
@@ -347,46 +387,44 @@ def arm_system():
 def create_placeholder(cam_name, status="STANDBY"):
     """Tactical-style placeholder with reticle, grid, and corner brackets."""
     h, w = 360, 640
-    img = np.zeros((h, w, 3), dtype=np.uint8) + 10
+    img = np.zeros((h, w, 3), dtype=np.uint8) + 11
 
+    # Grid lines
     for x in range(0, w, 64):
-        cv2.line(img, (x, 0), (x, h), (15, 28, 42), 1)
+        cv2.line(img, (x, 0), (x, h), (20, 33, 44), 1)
     for y in range(0, h, 64):
-        cv2.line(img, (0, y), (w, y), (15, 28, 42), 1)
+        cv2.line(img, (0, y), (w, y), (20, 33, 44), 1)
 
+    # Reticle
     cx, cy = w // 2, h // 2
-    cv2.line(img, (cx - 50, cy), (cx - 12, cy), (26, 50, 68), 1)
-    cv2.line(img, (cx + 12, cy), (cx + 50, cy), (26, 50, 68), 1)
-    cv2.line(img, (cx, cy - 40), (cx, cy - 12), (26, 50, 68), 1)
-    cv2.line(img, (cx, cy + 12), (cx, cy + 40), (26, 50, 68), 1)
-    cv2.circle(img, (cx, cy), 20, (26, 50, 68), 1)
-    cv2.circle(img, (cx, cy), 55, (18, 34, 50), 1)
-    cv2.circle(img, (cx, cy), 3, (28, 54, 72), -1)
+    cv2.line(img, (cx - 50, cy), (cx - 14, cy), (31, 56, 72), 1)
+    cv2.line(img, (cx + 14, cy), (cx + 50, cy), (31, 56, 72), 1)
+    cv2.line(img, (cx, cy - 40), (cx, cy - 14), (31, 56, 72), 1)
+    cv2.line(img, (cx, cy + 14), (cx, cy + 40), (31, 56, 72), 1)
+    cv2.circle(img, (cx, cy), 20, (31, 56, 72), 1)
+    cv2.circle(img, (cx, cy), 55, (22, 40, 55), 1)
+    cv2.circle(img, (cx, cy), 3,  (35, 60, 80), -1)
 
+    # Corner brackets
     bs = 20
     corners = [(40, 30, 1, 1), (w - 40, 30, -1, 1),
                (40, h - 30, 1, -1), (w - 40, h - 30, -1, -1)]
     for bx, by, dx, dy in corners:
-        cv2.line(img, (bx, by), (bx + bs * dx, by), (26, 50, 68), 1)
-        cv2.line(img, (bx, by), (bx, by + bs * dy), (26, 50, 68), 1)
+        cv2.line(img, (bx, by), (bx + bs * dx, by), (60, 200, 232), 1)
+        cv2.line(img, (bx, by), (bx, by + bs * dy), (60, 200, 232), 1)
 
     lw = cv2.getTextSize(cam_name, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)[0][0]
     cv2.putText(img, cam_name, (cx - lw // 2, cy - 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (36, 68, 88), 1)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (60, 200, 232), 1)
     sw = cv2.getTextSize(f"[ {status} ]", cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)[0][0]
     cv2.putText(img, f"[ {status} ]", (cx - sw // 2, cy + 76),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (22, 44, 60), 1)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (45, 70, 90), 1)
 
     return img
 
 # ---------------------------------------------------------
-# --- EDGE-TTS HINDI NEURAL VOICE (LIFETIME FREE) ---
+# --- EDGE-TTS HINDI NEURAL VOICE ---
 # ---------------------------------------------------------
-<<<<<<< HEAD
-def trigger_hindi_alert(text, filename="alert.mp3"):
-    if not os.path.exists(filename):
-        try:
-=======
 def trigger_hindi_alert(text):
     """Generate and play neural voice alert; hashed filename prevents stale audio caches."""
     try:
@@ -394,16 +432,11 @@ def trigger_hindi_alert(text):
         filename = f"alert_{text_hash}.mp3"
 
         if not os.path.exists(filename):
->>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
             async def _generate():
                 communicate = edge_tts.Communicate(text, "hi-IN-SwaraNeural")
                 await communicate.save(filename)
             asyncio.run(_generate())
 
-<<<<<<< HEAD
-    try:
-=======
->>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
         if os.path.exists(filename):
             with open(filename, "rb") as f:
                 audio_bytes = f.read()
@@ -479,9 +512,9 @@ class CameraWorker:
 
                     # CCTV Timestamp Overlay
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cctv_text = f"REC | CAM 01 | {now_str}"
-                    cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 4, cv2.LINE_AA)
-                    cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
+                    cctv_text = f"REC · CAM 01 · {now_str}"
+                    cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (0, 0, 0), 4, cv2.LINE_AA)
+                    cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (60, 200, 232), 2, cv2.LINE_AA)
 
                     # Engine 2: Base model for crowd counting
                     base_results = self.base_model(frame)
@@ -511,87 +544,6 @@ class CameraWorker:
                 pass
             self.cap = None
 
-# ---------------------------------------------------------
-# --- EMAIL ALERT SYSTEM (BACKGROUND THREADING) ---
-# ---------------------------------------------------------
-def send_email_worker(detection_type, person_count=0):
-    """Background task to send email without freezing the UI."""
-    try:
-        # ⚠️ YAHAN APNI DETAILS DAAL BHAI ⚠️
-        SENDER_EMAIL = "admin@example.com" 
-        APP_PASSWORD = "REDACTED_PASSWORD" 
-        ADMIN_EMAIL  = "nitinpanwar6963@gmail.com"
-
-        msg = MIMEMultipart()
-        msg['From'] = SENDER_EMAIL
-        msg['To'] = ADMIN_EMAIL
-        msg['Subject'] = f"🚨 URGENT: {detection_type.upper()} DETECTED AT MIET GATE!"
-
-        # Dynamic color and text based on hazard
-        is_fire = detection_type.upper() in ["FIRE", "SMOKE"]
-        bg_color = "#240000" if is_fire else "#291c00"
-        border_color = "#FF3A3A" if is_fire else "#FFB800"
-        
-        detail_msg = "Fire Safety Team required immediately!" if is_fire else f"Crowd limit exceeded (Live Count: {person_count} persons)."
-
-        html_content = f"""
-        <html>
-        <head>
-            <style>
-                .container {{
-                    background-color: #050A0F;
-                    padding: 30px;
-                    font-family: 'Courier New', Courier, monospace;
-                    color: #DCE8F0;
-                }}
-                .alert-box {{
-                    background-color: {bg_color};
-                    border-left: 5px solid {border_color};
-                    padding: 20px;
-                    border-radius: 4px;
-                }}
-                .header {{
-                    color: {border_color};
-                    font-size: 22px;
-                    font-weight: bold;
-                    margin-bottom: 10px;
-                }}
-                .meta {{ color: #7899B8; font-size: 14px; margin-top: 20px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="alert-box">
-                    <div class="header">⚠️ HAZARD LENS SYSTEM ALERT</div>
-                    <p style="font-size: 18px;"><strong>Hazard Type:</strong> {detection_type.upper()}</p>
-                    <p style="font-size: 16px;"><strong>Location:</strong> CAM 01 (MIET College Main Gate)</p>
-                    <p style="font-size: 16px;"><strong>Details:</strong> {detail_msg}</p>
-                </div>
-                <div class="meta">
-                    <p>Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-                    <p><em>This is an automated alert generated by HazardLens Command Center.</em></p>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
-        msg.attach(MIMEText(html_content, 'html'))
-
-        # Send Email
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(SENDER_EMAIL, APP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        print(f"✅ Email Alert Sent for {detection_type}")
-    except Exception as e:
-        print(f"❌ Failed to send email: {e}")
-
-def trigger_alert_email(detection_type, person_count=0):
-    """Triggers the email worker in a background thread."""
-    thread = threading.Thread(target=send_email_worker, args=(detection_type, person_count), daemon=True)
-    thread.start()
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR — Control Panel
 # ─────────────────────────────────────────────────────────────────────────────
@@ -615,26 +567,25 @@ with st.sidebar:
     st.markdown('<div class="sb-lbl">▸ Camera Status</div>', unsafe_allow_html=True)
     armed_now = st.session_state.system_armed
     cam_registry = [
-        ("CAM 01", "MIET COLLEGE MAIN GATE",        True),
+        ("CAM 01", "MIET COLLEGE MAIN GATE",   True),
         ("CAM 02", "RAILWAY STATION ENTRANCE",  False),
-        ("CAM 03", "METRO STATION ENTRANCE",         False),
-        ("CAM 04", "Server Room Backend",   False),
+        ("CAM 03", "METRO STATION ENTRANCE",    False),
+        ("CAM 04", "SERVER ROOM BACKEND",       False),
     ]
     for cn, loc, active in cam_registry:
         is_live  = active and armed_now
         s_text   = "LIVE"  if is_live else "STDBY"
-        s_color  = "var(--green)" if is_live else "var(--muted)"
-        dot_html = (
-            '<span class="dot dot-r" style="width:6px;height:6px;"></span> '
-            if is_live else "● "
-        )
+        s_color  = "var(--ok)" if is_live else "var(--mute)"
+        dot_cls  = "dot dot-r" if is_live else "dot dot-a"
         st.markdown(f"""
         <div class="sb-row">
           <div>
             <div class="sb-rn">{cn}</div>
             <div class="sb-rloc">{loc}</div>
           </div>
-          <span class="sb-rs" style="color:{s_color};">{dot_html}{s_text}</span>
+          <span class="sb-rs" style="color:{s_color};">
+            <span class="{dot_cls}" style="width:7px;height:7px;margin-right:4px;"></span>{s_text}
+          </span>
         </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="sb-lbl">▸ System Info</div>', unsafe_allow_html=True)
@@ -646,29 +597,42 @@ with st.sidebar:
     LANGUAGE &nbsp;&nbsp; : HI-IN<br>
     FRAME SKIP : {FRAME_SKIP} FRAMES<br>
     CROWD LIM &nbsp;: {CROWD_THRESHOLD} PERSONS<br>
+    CONF THRESH: {FIRE_CONF_THRESHOLD}<br>
+    COOLDOWN &nbsp;&nbsp;: {EMAIL_COOLDOWN_SEC}s
     </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MASTER HEADER
 # ─────────────────────────────────────────────────────────────────────────────
 armed = st.session_state.system_armed
-arm_cls  = "arm-on"  if armed else "arm-off"
-dot_cls  = "dot-g"   if armed else "dot-a"
-arm_txt  = "ARMED"   if armed else "STANDBY"
+arm_cls = "arm-on"  if armed else "arm-off"
+dot_cls = "dot dot-g" if armed else "dot dot-a"
+arm_txt = "ARMED"   if armed else "STANDBY"
 
 st.markdown(f"""
 <div class="hz-hdr">
-  <div>
-    <div class="hz-brand">⬡ HAZARD<em>LENS</em></div>
-    <div class="hz-sub">AI-POWERED SMART CITY SURVEILLANCE COMMAND</div>
+  <div class="hz-brand">
+    <svg class="hz-logo" width="28" height="28" viewBox="0 0 24 24" fill="none"
+         stroke="#3CC8E8" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 2.5 20.5 7.25v9.5L12 21.5l-8.5-4.75v-9.5z"/>
+      <circle cx="12" cy="12" r="3.2"/>
+    </svg>
+    <div>
+      <div class="hz-name">Hazard<em>Lens</em></div>
+      <div class="hz-sub">AI-Powered Smart City Surveillance Command · MIET Campus</div>
+    </div>
   </div>
   <div class="hz-right">
     <div class="stat-pill">
       <span class="stat-v">04</span>
       <span class="stat-l">Cameras</span>
     </div>
+    <div class="stat-pill">
+      <span class="stat-v">{CROWD_THRESHOLD}</span>
+      <span class="stat-l">Crowd Lim</span>
+    </div>
     <div class="{arm_cls}">
-      <span class="dot {dot_cls}"></span>{arm_txt}
+      <span class="{dot_cls}"></span>{arm_txt}
     </div>
   </div>
 </div>
@@ -690,11 +654,13 @@ if st.session_state.do_clear_alert:
 # ─────────────────────────────────────────────────────────────────────────────
 # CAMERA GRID
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="sdiv"><span class="sdiv-t">Active Monitoring Grid</span></div>',
-            unsafe_allow_html=True)
+st.markdown(
+    '<div class="sec-lbl">Active Monitoring Grid</div>',
+    unsafe_allow_html=True
+)
 
-live_badge = '<span class="badge-live"><span class="dot dot-r" style="width:6px;height:6px;"></span>LIVE</span>'
-stdby_badge = '<span class="badge-stdby">● STDBY</span>'
+live_badge  = '<span class="badge-live"><span class="dot dot-r" style="width:7px;height:7px;"></span>LIVE</span>'
+stdby_badge = '<span class="badge-stdby">NO SIGNAL</span>'
 
 col1, col2 = st.columns(2)
 
@@ -704,8 +670,8 @@ with col1:
     st.markdown(f"""
     <div class="{hdr_cls}">
       <div>
-        <div class="cam-nm">📹 CAM 01</div>
-        <div class="cam-loc">MIET COLLEGE MAIN GATE · AI-MONITORED</div>
+        <div class="cam-nm">CAM 01</div>
+        <div class="cam-loc">MIET College Main Gate</div>
       </div>
       {badge1}
     </div>""", unsafe_allow_html=True)
@@ -720,15 +686,15 @@ with col1:
     feed_01_frame = st.empty()
     feed_01_frame.image(create_placeholder("CAM 01"), use_container_width=True)
 
-    st.button("🔕 SILENCE CAM 01", key="silence_1",
+    st.button("🔕 Silence CAM 01", key="silence_1",
               on_click=silence_alerts, use_container_width=True)
 
 with col2:
     st.markdown(f"""
     <div class="cam-hdr">
       <div>
-        <div class="cam-nm">📷 CAM 02</div>
-        <div class="cam-loc">RAILWAY STATION ENTRANCE · STANDBY</div>
+        <div class="cam-nm">CAM 02</div>
+        <div class="cam-loc">Railway Station Entrance</div>
       </div>
       {stdby_badge}
     </div>""", unsafe_allow_html=True)
@@ -736,7 +702,7 @@ with col2:
         '<div class="mstrip"><span class="ml">Crowd Count</span>'
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
     st.image(create_placeholder("CAM 02"), use_container_width=True)
-    st.button("🔕 SILENCE CAM 02", key="silence_2",
+    st.button("🔕 Silence CAM 02", key="silence_2",
               on_click=dummy_silence, args=("CAM 02",), use_container_width=True)
 
 col3, col4 = st.columns(2)
@@ -745,8 +711,8 @@ with col3:
     st.markdown(f"""
     <div class="cam-hdr">
       <div>
-        <div class="cam-nm">📷 CAM 03</div>
-        <div class="cam-loc">METRO STATION ENTRANCE · STANDBY</div>
+        <div class="cam-nm">CAM 03</div>
+        <div class="cam-loc">Metro Station Entrance</div>
       </div>
       {stdby_badge}
     </div>""", unsafe_allow_html=True)
@@ -754,15 +720,15 @@ with col3:
         '<div class="mstrip"><span class="ml">Crowd Count</span>'
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
     st.image(create_placeholder("CAM 03"), use_container_width=True)
-    st.button("🔕 SILENCE CAM 03", key="silence_3",
+    st.button("🔕 Silence CAM 03", key="silence_3",
               on_click=dummy_silence, args=("CAM 03",), use_container_width=True)
 
 with col4:
     st.markdown(f"""
     <div class="cam-hdr">
       <div>
-        <div class="cam-nm">📷 CAM 04</div>
-        <div class="cam-loc">SERVER ROOM BACKEND · STANDBY</div>
+        <div class="cam-nm">CAM 04</div>
+        <div class="cam-loc">Server Room Backend</div>
       </div>
       {stdby_badge}
     </div>""", unsafe_allow_html=True)
@@ -770,7 +736,7 @@ with col4:
         '<div class="mstrip"><span class="ml">Crowd Count</span>'
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
     st.image(create_placeholder("CAM 04"), use_container_width=True)
-    st.button("🔕 SILENCE CAM 04", key="silence_4",
+    st.button("🔕 Silence CAM 04", key="silence_4",
               on_click=dummy_silence, args=("CAM 04",), use_container_width=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -778,8 +744,9 @@ with col4:
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="ftr">
-  <span>⬡ HAZARDLENS COMMAND v2.0 · MIET CAMPUS, MEERUT</span>
-  <span><span class="online">●</span> TWIN AI ONLINE · EDGE-TTS ENABLED</span>
+  <span>⬡ HAZARDLENS COMMAND V2.0 · MIET CAMPUS, MEERUT</span>
+  <span>TWIN YOLOV8 · EDGE-TTS · RESEND</span>
+  <span><span class="online">●</span> ALL TIMES IST (UTC+05:30)</span>
   <span id="ftr-dt">—</span>
 </div>
 <script>
@@ -844,75 +811,32 @@ def update_live_monitoring():
     # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins") ──
     now = time.time()
     if fire_spotted:
-        # Trigger only if no Fire Alert is currently active (Fire Alert overrides Crowd Alert)
+        # Fire alert overrides Crowd alert
         if st.session_state.get("active_alert") != "FIRE":
             alert_pos.markdown("""
             <div class="a-fire">
-              <span class="a-ico">🔥</span>
+              <div class="a-ico-wrap">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6
+                           .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0
+                           c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
+                </svg>
+              </div>
               <div>
-                <div class="a-ttl">Fire / Smoke Hazard Detected — CAM 01</div>
+                <div class="a-kicker">FIRE · SMOKE HAZARD</div>
+                <div class="a-ttl">Fire / Smoke Detected — CAM 01</div>
                 <div class="a-msg">MIET Main Gate · High-confidence AI detection · Fire Safety Team Dispatched</div>
               </div>
             </div>""", unsafe_allow_html=True)
 
-<<<<<<< HEAD
-            # ── 1. FIRE / SMOKE ALERT ──
-            if fire_spotted:
-                # Trigger only if no Fire Alert is currently active (Fire Alert overrides Crowd Alert).
-                if st.session_state.get("active_alert") != "FIRE":
-                    alert_pos.markdown("""
-                    <div class="a-fire">
-                      <span class="a-ico">🔥</span>
-                      <div>
-                        <div class="a-ttl">Fire / Smoke Hazard Detected — CAM 01</div>
-                        <div class="a-msg">MIET Main Gate · High-confidence AI detection · Fire Safety Team Dispatched</div>
-                      </div>
-                    </div>""", unsafe_allow_html=True)
-                    
-                    trigger_hindi_alert(
-                        "कृपया ध्यान दें। मेन गेट पर आग डिटेक्ट हुई है। तुरंत फायर सेफ्टी टीम डिस्पैच करें।",
-                        filename="fire_alert.mp3"
-                    )
-                    
-                    # ── THREADED EMAIL ALERT CALL ──
-                    trigger_alert_email("Fire/Smoke")
-                    
-                    st.session_state.active_alert = "FIRE"
-
-            # ── 2. OVERCROWDING ALERT (Latest Override) ──
-            elif person_count > CROWD_THRESHOLD:
-                # Trigger only if no Crowd Alert is currently active (Fire Alert overrides Crowd Alert).
-                if st.session_state.get("active_alert") != "CROWD":
-                    alert_pos.markdown(f"""
-                    <div class="a-crwd">
-                      <span class="a-ico">🚨</span>
-                      <div>
-                        <div class="a-ttl">Overcrowding Detected — CAM 01</div>
-                        <div class="a-msg">MIET Main Gate · Live Count: {person_count} persons · Security Team Dispatch Triggered</div>
-                      </div>
-                    </div>""", unsafe_allow_html=True)
-                    
-                    trigger_hindi_alert(
-                        "कृपया ध्यान दें। मेन गेट एंट्रेंस पर ओवरक्राउडिंग डिटेक्ट हुई है। तुरंत सिक्योरिटी स्टाफ डिस्पैच करें।",
-                        filename="crowd_alert.mp3"
-                    )
-                    
-                    # ── THREADED EMAIL ALERT CALL ──
-                    trigger_alert_email("Overcrowding", person_count)
-                    
-                    st.session_state.active_alert = "CROWD"
-            
-            # ── 3. RESET (if no alerts are detected) ──
-            else:
-                st.session_state.active_alert = None
-=======
             last_audio = st.session_state.last_audio_ts.get("FIRE", 0.0)
             if now - last_audio > AUDIO_COOLDOWN_SEC:
                 trigger_hindi_alert("कृपया ध्यान दें। मेन गेट पर आग डिटेक्ट हुई है। तुरंत फायर सेफ्टी टीम डिस्पैच करें।")
                 st.session_state.last_audio_ts["FIRE"] = now
 
             email_alerter.send_alert("FIRE")
->>>>>>> cf534eb (feat: HazardLens command center with twin YOLOv8, Resend alerts, and verification tools)
 
             st.session_state.active_alert = "FIRE"
 
@@ -921,9 +845,19 @@ def update_live_monitoring():
         if st.session_state.get("active_alert") != "CROWD":
             alert_pos.markdown(f"""
             <div class="a-crwd">
-              <span class="a-ico">🚨</span>
+              <div class="a-ico-wrap">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                  <circle cx="9" cy="7" r="4"/>
+                  <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+              </div>
               <div>
-                <div class="a-ttl">Overcrowding Detected — CAM 01</div>
+                <div class="a-kicker">OVERCROWDING ALERT</div>
+                <div class="a-ttl">Crowd Limit Exceeded — CAM 01</div>
                 <div class="a-msg">MIET Main Gate · Live Count: {person_count} persons · Security Team Dispatch Triggered</div>
               </div>
             </div>""", unsafe_allow_html=True)
