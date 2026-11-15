@@ -1,4 +1,6 @@
 import streamlit as st
+import streamlit.components.v1 as components
+import base64
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -45,6 +47,10 @@ EMAIL_COOLDOWN_SEC    = 120
 AUDIO_COOLDOWN_SEC    = 120
 ALERT_CLEAR_GRACE_SEC = 3.0  # Debounce: delay clearing alerts by 3s to prevent visual banner flicker
 SILENCE_DURATION_SEC  = 60   # Cooldown: mute alerts for 60s when operator clicks Silence
+
+# Standard Hindi Voice Alert Prompts
+FIRE_TTS_TEXT  = "कृपया ध्यान दें। मेन गेट पर आग डिटेक्ट हुई है। तुरंत फायर सेफ्टी टीम डिस्पैच करें।"
+CROWD_TTS_TEXT = "कृपया ध्यान दें। मेन गेट एंट्रेंस पर ओवरक्राउडिंग डिटेक्ट हुई है। तुरंत सिक्योरिटी स्टाफ डिस्पैच करें।"
 
 # Thread-safety lock for YOLO / PyTorch model inference across threads
 model_inference_lock = threading.Lock()
@@ -343,6 +349,11 @@ section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
   border-color: var(--acc) !important;
 }
+
+/* Keep background alert audio player hidden so it does not distort camera grid layout */
+div[data-testid="stAudio"] {
+  display: none !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -357,6 +368,10 @@ if 'hazard_clear_ts'  not in st.session_state: st.session_state.hazard_clear_ts 
 if 'silenced_until'   not in st.session_state: st.session_state.silenced_until   = 0.0
 if 'last_audio_ts'    not in st.session_state: st.session_state.last_audio_ts    = {"FIRE": 0.0, "CROWD": 0.0}
 if 'camera_worker'    not in st.session_state: st.session_state.camera_worker    = None
+if 'live_crowd_count' not in st.session_state: st.session_state.live_crowd_count = 0
+if 'active_audio_b64' not in st.session_state: st.session_state.active_audio_b64 = None
+if 'active_audio_id'  not in st.session_state: st.session_state.active_audio_id  = 0
+if 'audio_expire_ts'  not in st.session_state: st.session_state.audio_expire_ts  = 0.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL LOADING  (cached for zero-lag reloads with SHA-256 integrity check)
@@ -390,6 +405,10 @@ def silence_alerts():
     st.session_state.do_clear_alert  = True
     st.session_state.active_alert    = None
     st.session_state.hazard_clear_ts = None
+    st.session_state.active_audio_b64 = None
+    st.session_state.audio_expire_ts = 0.0
+    st.session_state.active_audio_id += 1
+    play_persistent_audio(None, 0)
     st.toast(f"🔕 CAM 01 alerts silenced for {SILENCE_DURATION_SEC}s.")
 
 def disarm_system():
@@ -398,6 +417,10 @@ def disarm_system():
     st.session_state.active_alert    = None
     st.session_state.hazard_clear_ts = None
     st.session_state.silenced_until  = 0.0
+    st.session_state.active_audio_b64 = None
+    st.session_state.audio_expire_ts = 0.0
+    st.session_state.active_audio_id += 1
+    play_persistent_audio(None, 0)
     if st.session_state.get('camera_worker') is not None:
         st.session_state.camera_worker.stop()
         st.session_state.camera_worker = None
@@ -408,6 +431,7 @@ def arm_system():
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data
 def create_placeholder(cam_name, status="STANDBY"):
     """Tactical-style placeholder with reticle, grid, and corner brackets."""
     h, w = 360, 640
@@ -447,26 +471,126 @@ def create_placeholder(cam_name, status="STANDBY"):
     return img
 
 # ---------------------------------------------------------
-# --- EDGE-TTS HINDI NEURAL VOICE ---
+# --- EDGE-TTS HINDI NEURAL VOICE (SAFE ISOLATED THREAD) ---
 # ---------------------------------------------------------
-def trigger_hindi_alert(text):
-    """Generate and play neural voice alert; hashed filename prevents stale audio caches."""
-    try:
-        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:8]
-        filename = f"alert_{text_hash}.mp3"
-
-        if not os.path.exists(filename):
+def _generate_tts_sync(text, filename):
+    """Run edge-tts async generation safely inside an isolated thread with a clean event loop."""
+    def _thread_target():
+        try:
             async def _generate():
                 communicate = edge_tts.Communicate(text, "hi-IN-SwaraNeural")
                 await communicate.save(filename)
             asyncio.run(_generate())
+        except Exception as e:
+            print(f"Edge-TTS thread generation error: {e}")
 
-        if os.path.exists(filename):
+    t = threading.Thread(target=_thread_target, daemon=True)
+    t.start()
+    t.join(timeout=5.0)
+
+    # Fallback to local audio asset if network is unreachable or generation fails
+    if (not os.path.exists(filename) or os.path.getsize(filename) == 0) and os.path.exists("fire_alert.mp3"):
+        try:
+            import shutil
+            shutil.copyfile("fire_alert.mp3", filename)
+        except Exception as e:
+            print(f"Fallback copy error: {e}")
+
+@st.cache_resource
+def prewarm_tts_assets():
+    """Pre-generates both Hindi voice alert MP3s on startup so they exist on disk before monitoring starts."""
+    for text in (FIRE_TTS_TEXT, CROWD_TTS_TEXT):
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:8]
+        filename = f"alert_{text_hash}.mp3"
+        if not os.path.exists(filename) or os.path.getsize(filename) == 0:
+            _generate_tts_sync(text, filename)
+    return True
+
+prewarm_tts_assets()
+
+def trigger_hindi_alert(text):
+    """Sets active audio in session state for persistent playback across fragment reruns."""
+    try:
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:8]
+        filename = f"alert_{text_hash}.mp3"
+
+        if not os.path.exists(filename) or os.path.getsize(filename) == 0:
+            _generate_tts_sync(text, filename)
+
+        if os.path.exists(filename) and os.path.getsize(filename) > 0:
             with open(filename, "rb") as f:
                 audio_bytes = f.read()
-            audio_pos.audio(audio_bytes, format="audio/mp3", autoplay=True)
+            st.session_state.active_audio_b64 = base64.b64encode(audio_bytes).decode('ascii')
+            st.session_state.active_audio_id += 1
+            st.session_state.audio_expire_ts = time.time() + 10.0
     except Exception as e:
         print(f"TTS Error: {e}")
+
+def play_persistent_audio(b64_audio: str = None, audio_id: int = 0):
+    """
+    Plays audio via the top-level parent window Web Audio controller to prevent
+    fragment unmount and Diff resets every 0.5s. Loops infinitely with a 1.2s pause
+    until explicitly stopped.
+    """
+    try:
+        if not b64_audio:
+            stop_script = """
+            <script>
+            (function() {
+              const w = window.parent;
+              if (w) {
+                if (w._hzLoopTimer) {
+                  try { clearTimeout(w._hzLoopTimer); } catch(e) {}
+                  w._hzLoopTimer = null;
+                }
+                if (w._hzAudio) {
+                  try {
+                    w._hzAudio.pause();
+                    w._hzAudio.currentTime = 0;
+                  } catch(e) {}
+                  w._hzAudio = null;
+                }
+                w._hzLastAudioId = null;
+              }
+            })();
+            </script>
+            """
+            components.html(stop_script, height=0, width=0)
+            return
+
+        script = f"""
+        <script>
+        (function() {{
+          const w = window.parent;
+          const audioId = {audio_id};
+          if (w._hzLastAudioId !== audioId) {{
+            w._hzLastAudioId = audioId;
+            if (w._hzLoopTimer) {{
+              try {{ clearTimeout(w._hzLoopTimer); }} catch(e) {{}}
+              w._hzLoopTimer = null;
+            }}
+            if (w._hzAudio) {{
+              try {{ w._hzAudio.pause(); }} catch(e) {{}}
+            }}
+            w._hzAudio = new w.Audio("data:audio/mp3;base64,{b64_audio}");
+            w._hzAudio.onended = function() {{
+              if (w._hzAudio) {{
+                w._hzLoopTimer = setTimeout(function() {{
+                  if (w._hzAudio) {{
+                    w._hzAudio.currentTime = 0;
+                    w._hzAudio.play().catch(function(e){{}});
+                  }}
+                }}, 1200);
+              }}
+            }};
+            w._hzAudio.play().catch(e => console.warn("Audio play blocked:", e));
+          }}
+        }})();
+        </script>
+        """
+        components.html(script, height=0, width=0)
+    except Exception as e:
+        print(f"Parent-window audio controller error: {e}")
 
 # ---------------------------------------------------------
 # --- THREADED CAMERA WORKER (NON-BLOCKING INFERENCE) ---
@@ -523,21 +647,29 @@ class CameraWorker:
         while self.running and self.cap is not None and self.cap.isOpened():
             ret, frame = self.cap.read()
             if not ret:
-                failed_reads += 1
-                time.sleep(0.04)
-                if failed_reads >= 30:  # ~1.2s stream drop: auto-reconnect
-                    try:
-                        self.cap.release()
-                    except Exception:
-                        pass
-                    time.sleep(1.0)
-                    try:
-                        self.cap = cv2.VideoCapture(self.ip_url)
-                        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        failed_reads = 0
-                    except Exception as e:
-                        print(f"Reconnection attempt failed: {e}")
-                continue
+                # Infinite loop for local demo video files without reconnect penalty
+                if isinstance(self.ip_url, str) and os.path.isfile(self.ip_url):
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        time.sleep(0.04)
+                        continue
+                else:
+                    failed_reads += 1
+                    time.sleep(0.04)
+                    if failed_reads >= 30:  # ~1.2s stream drop: auto-reconnect
+                        try:
+                            self.cap.release()
+                        except Exception:
+                            pass
+                        time.sleep(1.0)
+                        try:
+                            self.cap = cv2.VideoCapture(self.ip_url)
+                            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                            failed_reads = 0
+                        except Exception as e:
+                            print(f"Reconnection attempt failed: {e}")
+                    continue
 
             failed_reads = 0
             count += 1
@@ -596,7 +728,7 @@ with st.sidebar:
         with col_auth1:
             st.markdown('<div class="sb-rn" style="color:var(--ok);padding-top:8px;">🟢 AUTHENTICATED</div>', unsafe_allow_html=True)
         with col_auth2:
-            st.button("🔒 Lock", on_click=lock_operator, use_container_width=True)
+            st.button("🔒 Lock", on_click=lock_operator, width="stretch")
     else:
         pin_val = st.text_input(
             "Operator PIN",
@@ -605,7 +737,7 @@ with st.sidebar:
             key="pin_gate_input",
             label_visibility="collapsed"
         )
-        if st.button("🔓 Unlock Controls", key="btn_unlock_pin", use_container_width=True):
+        if st.button("🔓 Unlock Controls", key="btn_unlock_pin", width="stretch"):
             expected_pin = os.getenv("HAZARDLENS_OPERATOR_PIN", "1234")
             if verify_operator_pin(pin_val, expected_pin):
                 st.session_state.is_operator = True
@@ -646,9 +778,9 @@ with st.sidebar:
         st.caption("🔒 Unlock Operator Gate to ARM / DISARM system.")
     ca, cb = st.columns(2)
     with ca:
-        st.button("🔴 ARM",    on_click=arm_system,    disabled=not st.session_state.is_operator, use_container_width=True)
+        st.button("🔴 ARM",    on_click=arm_system,    disabled=not st.session_state.is_operator, width="stretch")
     with cb:
-        st.button("⬛ DISARM", on_click=disarm_system, disabled=not st.session_state.is_operator, use_container_width=True)
+        st.button("⬛ DISARM", on_click=disarm_system, disabled=not st.session_state.is_operator, width="stretch")
 
     st.markdown('<div class="sb-lbl">▸ Camera Status</div>', unsafe_allow_html=True)
     armed_now = st.session_state.system_armed
@@ -733,26 +865,218 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GLOBAL ALERT & AUDIO PLACEHOLDERS
+# TOP ALERT BANNER (FRAGMENT SCOPED — PERSISTENT ACROSS RERUNS)
 # ─────────────────────────────────────────────────────────────────────────────
-alert_pos = st.empty()
-audio_pos = st.empty()
+def render_alert_banner():
+    """Renders the top alert banner persistently whenever an alert is active."""
+    armed = st.session_state.get("system_armed", False)
+    now = time.time()
+    is_silenced = (now < st.session_state.get('silenced_until', 0.0))
+    active_alert = st.session_state.get("active_alert")
 
-if st.session_state.do_clear_alert:
-    alert_pos.empty()
-    audio_pos.empty()
-    st.session_state.do_clear_alert = False
+    if not armed or is_silenced or not active_alert:
+        return
+
+    if active_alert == "FIRE":
+        st.markdown("""
+        <div class="a-fire">
+          <div class="a-ico-wrap">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6
+                       .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0
+                       c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
+            </svg>
+          </div>
+          <div>
+            <div class="a-kicker">FIRE · SMOKE HAZARD</div>
+            <div class="a-ttl">Fire / Smoke Detected — CAM 01</div>
+            <div class="a-msg">MIET Main Gate · High-confidence AI detection · Fire Safety Team Dispatched</div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+    elif active_alert == "CROWD":
+        live_count = st.session_state.get("live_crowd_count", 0)
+        st.markdown(f"""
+        <div class="a-crwd">
+          <div class="a-ico-wrap">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+          </div>
+          <div>
+            <div class="a-kicker">OVERCROWDING ALERT</div>
+            <div class="a-ttl">Crowd Limit Exceeded — CAM 01</div>
+            <div class="a-msg">MIET Main Gate · Live Count: {live_count} persons · Security Team Dispatch Triggered</div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+if hasattr(st, "fragment"):
+    @st.fragment(run_every=0.5)
+    def alert_banner_fragment():
+        render_alert_banner()
+
+    alert_banner_fragment()
+else:
+    render_alert_banner()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CAMERA GRID
+# CAMERA GRID (STATIC CAMERAS RENDER ONCE, ONLY CAM 01 IS FRAGMENT-SCOPED)
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown(
-    '<div class="sec-lbl">Active Monitoring Grid</div>',
-    unsafe_allow_html=True
-)
+st.markdown('<div class="sec-lbl">Active Monitoring Grid</div>', unsafe_allow_html=True)
 
+armed = st.session_state.system_armed
 live_badge  = '<span class="badge-live"><span class="dot dot-r" style="width:7px;height:7px;"></span>LIVE</span>'
 stdby_badge = '<span class="badge-stdby">NO SIGNAL</span>'
+
+def render_cam_01_feed(stream_url):
+    """Dynamic feed, metric strip, silence button, and hazard detection for CAM 01."""
+    armed = st.session_state.get("system_armed", False)
+
+    now = time.time()
+    is_silenced = (now < st.session_state.get('silenced_until', 0.0))
+
+    # When disarmed, ALWAYS render metric strip and standby placeholder before returning
+    if not armed:
+        if st.session_state.get('camera_worker') is not None:
+            try:
+                st.session_state.camera_worker.stop()
+            except Exception:
+                pass
+            st.session_state.camera_worker = None
+
+        st.session_state.active_alert = None
+        st.session_state.hazard_clear_ts = None
+        st.session_state.active_audio_b64 = None
+        st.session_state.audio_expire_ts = 0.0
+        play_persistent_audio(None, 0)
+
+        st.markdown(
+            '<div class="mstrip"><span class="ml">Crowd Count</span>'
+            '<span class="mv off">—</span></div>',
+            unsafe_allow_html=True
+        )
+        st.image(create_placeholder("CAM 01", "STANDBY"), width="stretch")
+        st.button("🔕 Silence CAM 01", key="silence_1",
+                  disabled=not st.session_state.is_operator,
+                  on_click=silence_alerts, width="stretch")
+        return
+
+    # When armed, ensure background worker is running for stream_url
+    worker = st.session_state.get('camera_worker')
+    if worker is None or not worker.running or worker.ip_url != stream_url:
+        if worker is not None:
+            try:
+                worker.stop()
+            except Exception:
+                pass
+        worker = CameraWorker(
+            ip_url=stream_url,
+            fire_mod=fire_model,
+            base_mod=base_model,
+            fire_conf=FIRE_CONF_THRESHOLD,
+            crowd_thresh=CROWD_THRESHOLD,
+            frame_skip=FRAME_SKIP
+        )
+        st.session_state.camera_worker = worker
+        worker.start()
+
+    # Read latest inference frame and values from worker
+    with worker.lock:
+        frame = worker.latest_frame
+        person_count = worker.person_count
+        fire_spotted = worker.fire_spotted
+
+    st.session_state.live_crowd_count = person_count
+
+    if frame is not None:
+        st.markdown(
+            f'<div class="mstrip"><span class="ml">Crowd Count</span>'
+            f'<span class="mv">👥 {person_count}</span></div>',
+            unsafe_allow_html=True
+        )
+        st.image(frame, channels="RGB", width="stretch")
+    else:
+        st.markdown(
+            '<div class="mstrip"><span class="ml">Crowd Count</span>'
+            '<span class="mv off">—</span></div>',
+            unsafe_allow_html=True
+        )
+        st.image(create_placeholder("CAM 01", "CONNECTING..."), width="stretch")
+
+    st.button("🔕 Silence CAM 01", key="silence_1",
+              disabled=not st.session_state.is_operator,
+              on_click=silence_alerts, width="stretch")
+
+    # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins" + Silence Cooldown + Debounced Clearing) ──
+    if is_silenced:
+        st.session_state.active_alert = None
+        st.session_state.active_audio_b64 = None
+        st.session_state.audio_expire_ts = 0.0
+        play_persistent_audio(None, 0)
+        # Debounced Auto-Release
+        if not fire_spotted and person_count <= CROWD_THRESHOLD:
+            if st.session_state.hazard_clear_ts is None:
+                st.session_state.hazard_clear_ts = now
+            elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
+                st.session_state.silenced_until  = 0.0
+                st.session_state.hazard_clear_ts = None
+        else:
+            st.session_state.hazard_clear_ts = None
+        return
+
+    if fire_spotted:
+        st.session_state.hazard_clear_ts = None
+        prev_alert = st.session_state.get("active_alert")
+        if prev_alert != "FIRE":
+            last_audio = st.session_state.last_audio_ts.get("FIRE", 0.0)
+            if now - last_audio > AUDIO_COOLDOWN_SEC:
+                trigger_hindi_alert(FIRE_TTS_TEXT)
+                st.session_state.last_audio_ts["FIRE"] = now
+            email_alerter.send_alert("FIRE")
+
+        st.session_state.active_alert = "FIRE"
+
+    elif person_count > CROWD_THRESHOLD:
+        st.session_state.hazard_clear_ts = None
+        prev_alert = st.session_state.get("active_alert")
+        if prev_alert != "CROWD":
+            last_audio = st.session_state.last_audio_ts.get("CROWD", 0.0)
+            if now - last_audio > AUDIO_COOLDOWN_SEC:
+                trigger_hindi_alert(CROWD_TTS_TEXT)
+                st.session_state.last_audio_ts["CROWD"] = now
+            email_alerter.send_alert("CROWD", person_count)
+
+        st.session_state.active_alert = "CROWD"
+
+    else:
+        # Reset alert display if hazards have cleared (debounced with grace period to prevent flickering)
+        if st.session_state.get("active_alert") is not None:
+            if st.session_state.hazard_clear_ts is None:
+                st.session_state.hazard_clear_ts = now
+            elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
+                st.session_state.active_alert = None
+                st.session_state.hazard_clear_ts = None
+                st.session_state.active_audio_b64 = None
+                play_persistent_audio(None, 0)
+
+    # Persistent Parent-Window Web Audio Playback (Loops infinitely until Silence/Disarm or Hazard Clears)
+    active_b64 = st.session_state.get('active_audio_b64')
+    active_id = st.session_state.get('active_audio_id', 0)
+    has_active_hazard = (st.session_state.get('active_alert') is not None)
+
+    if armed and not is_silenced and active_b64 and has_active_hazard:
+        play_persistent_audio(active_b64, active_id)
+    else:
+        if not has_active_hazard:
+            st.session_state.active_audio_b64 = None
+        if not armed or is_silenced or not has_active_hazard:
+            play_persistent_audio(None, 0)
 
 col1, col2 = st.columns(2)
 
@@ -768,19 +1092,17 @@ with col1:
       {badge1}
     </div>""", unsafe_allow_html=True)
 
-    metric_cpu = st.empty()
-    metric_cpu.markdown(
-        '<div class="mstrip"><span class="ml">Crowd Count</span>'
-        '<span class="mv off">—</span></div>',
-        unsafe_allow_html=True
-    )
+    if hasattr(st, "fragment"):
+        @st.fragment(run_every=0.5)
+        def cam_01_live_fragment(stream_url):
+            render_cam_01_feed(stream_url)
 
-    feed_01_frame = st.empty()
-    feed_01_frame.image(create_placeholder("CAM 01"), use_container_width=True)
-
-    st.button("🔕 Silence CAM 01", key="silence_1",
-              disabled=not st.session_state.is_operator,
-              on_click=silence_alerts, use_container_width=True)
+        cam_01_live_fragment(ip_url)
+    else:
+        render_cam_01_feed(ip_url)
+        if st.session_state.system_armed:
+            time.sleep(0.5)
+            st.rerun()
 
 with col2:
     st.markdown(f"""
@@ -794,10 +1116,10 @@ with col2:
     st.markdown(
         '<div class="mstrip"><span class="ml">Crowd Count</span>'
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
-    st.image(create_placeholder("CAM 02"), use_container_width=True)
+    st.image(create_placeholder("CAM 02"), width="stretch")
     st.button("🔕 Silence CAM 02", key="silence_2",
               disabled=not st.session_state.is_operator,
-              on_click=dummy_silence, args=("CAM 02",), use_container_width=True)
+              on_click=dummy_silence, args=("CAM 02",), width="stretch")
 
 col3, col4 = st.columns(2)
 
@@ -813,10 +1135,10 @@ with col3:
     st.markdown(
         '<div class="mstrip"><span class="ml">Crowd Count</span>'
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
-    st.image(create_placeholder("CAM 03"), use_container_width=True)
+    st.image(create_placeholder("CAM 03"), width="stretch")
     st.button("🔕 Silence CAM 03", key="silence_3",
               disabled=not st.session_state.is_operator,
-              on_click=dummy_silence, args=("CAM 03",), use_container_width=True)
+              on_click=dummy_silence, args=("CAM 03",), width="stretch")
 
 with col4:
     st.markdown(f"""
@@ -830,10 +1152,10 @@ with col4:
     st.markdown(
         '<div class="mstrip"><span class="ml">Crowd Count</span>'
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
-    st.image(create_placeholder("CAM 04"), use_container_width=True)
+    st.image(create_placeholder("CAM 04"), width="stretch")
     st.button("🔕 Silence CAM 04", key="silence_4",
               disabled=not st.session_state.is_operator,
-              on_click=dummy_silence, args=("CAM 04",), use_container_width=True)
+              on_click=dummy_silence, args=("CAM 04",), width="stretch")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FOOTER STATUS BAR
@@ -853,163 +1175,3 @@ st.markdown("""
 })();
 </script>
 """, unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# NON-BLOCKING MONITORING & ALERT DISPATCH
-# ─────────────────────────────────────────────────────────────────────────────
-def update_live_monitoring():
-    if not st.session_state.system_armed:
-        if st.session_state.get('camera_worker') is not None:
-            st.session_state.camera_worker.stop()
-            st.session_state.camera_worker = None
-        if st.session_state.do_clear_alert:
-            alert_pos.empty()
-            audio_pos.empty()
-            metric_cpu.markdown(
-                '<div class="mstrip"><span class="ml">Crowd Count</span>'
-                '<span class="mv off">—</span></div>',
-                unsafe_allow_html=True
-            )
-            feed_01_frame.image(create_placeholder("CAM 01"), use_container_width=True)
-            st.session_state.do_clear_alert = False
-        return
-
-    # When armed, ensure background worker is running for the given ip_url
-    worker = st.session_state.get('camera_worker')
-    if worker is None or not worker.running or worker.ip_url != ip_url:
-        if worker is not None:
-            worker.stop()
-        worker = CameraWorker(
-            ip_url=ip_url,
-            fire_mod=fire_model,
-            base_mod=base_model,
-            fire_conf=FIRE_CONF_THRESHOLD,
-            crowd_thresh=CROWD_THRESHOLD,
-            frame_skip=FRAME_SKIP
-        )
-        st.session_state.camera_worker = worker
-        worker.start()
-
-    # Read latest inference frame and values from worker
-    with worker.lock:
-        frame = worker.latest_frame
-        person_count = worker.person_count
-        fire_spotted = worker.fire_spotted
-
-    if frame is not None:
-        feed_01_frame.image(frame, channels="RGB", use_container_width=True)
-        metric_cpu.markdown(
-            f'<div class="mstrip"><span class="ml">Crowd Count</span>'
-            f'<span class="mv">👥 {person_count}</span></div>',
-            unsafe_allow_html=True
-        )
-
-    # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins" + Silence Cooldown + Debounced Clearing) ──
-    now = time.time()
-    is_silenced = (now < st.session_state.get('silenced_until', 0.0))
-
-    if is_silenced:
-        # Operator has silenced alerts: clear active banners and suppress audio & email dispatches
-        alert_pos.empty()
-        audio_pos.empty()
-        # Debounced Auto-Release: Require sustained absence of hazards for ALERT_CLEAR_GRACE_SEC (3.0s)
-        # before releasing silence early. Prevents single-frame YOLO misses from breaking silence prematurely.
-        if not fire_spotted and person_count <= CROWD_THRESHOLD:
-            if st.session_state.hazard_clear_ts is None:
-                st.session_state.hazard_clear_ts = now
-            elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
-                st.session_state.silenced_until  = 0.0
-                st.session_state.active_alert    = None
-                st.session_state.hazard_clear_ts = None
-        else:
-            # Hazard is still actively observed in this frame; reset clear timer to keep silence protected
-            st.session_state.hazard_clear_ts = None
-        return
-
-    if fire_spotted:
-        st.session_state.hazard_clear_ts = None
-        # Fire alert overrides Crowd alert
-        if st.session_state.get("active_alert") != "FIRE":
-            alert_pos.markdown("""
-            <div class="a-fire">
-              <div class="a-ico-wrap">
-                <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6
-                           .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0
-                           c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
-                </svg>
-              </div>
-              <div>
-                <div class="a-kicker">FIRE · SMOKE HAZARD</div>
-                <div class="a-ttl">Fire / Smoke Detected — CAM 01</div>
-                <div class="a-msg">MIET Main Gate · High-confidence AI detection · Fire Safety Team Dispatched</div>
-              </div>
-            </div>""", unsafe_allow_html=True)
-
-            last_audio = st.session_state.last_audio_ts.get("FIRE", 0.0)
-            if now - last_audio > AUDIO_COOLDOWN_SEC:
-                trigger_hindi_alert("कृपया ध्यान दें। मेन गेट पर आग डिटेक्ट हुई है। तुरंत फायर सेफ्टी टीम डिस्पैच करें।")
-                st.session_state.last_audio_ts["FIRE"] = now
-
-            email_alerter.send_alert("FIRE")
-
-            st.session_state.active_alert = "FIRE"
-
-    elif person_count > CROWD_THRESHOLD:
-        st.session_state.hazard_clear_ts = None
-        # Trigger only if no Crowd Alert is currently active
-        if st.session_state.get("active_alert") != "CROWD":
-            alert_pos.markdown(f"""
-            <div class="a-crwd">
-              <div class="a-ico-wrap">
-                <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
-                  <circle cx="9" cy="7" r="4"/>
-                  <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
-                  <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-                </svg>
-              </div>
-              <div>
-                <div class="a-kicker">OVERCROWDING ALERT</div>
-                <div class="a-ttl">Crowd Limit Exceeded — CAM 01</div>
-                <div class="a-msg">MIET Main Gate · Live Count: {person_count} persons · Security Team Dispatch Triggered</div>
-              </div>
-            </div>""", unsafe_allow_html=True)
-
-            last_audio = st.session_state.last_audio_ts.get("CROWD", 0.0)
-            if now - last_audio > AUDIO_COOLDOWN_SEC:
-                trigger_hindi_alert("कृपया ध्यान दें। मेन गेट एंट्रेंस पर ओवरक्राउडिंग डिटेक्ट हुई है। तुरंत सिक्योरिटी स्टाफ डिस्पैच करें।")
-                st.session_state.last_audio_ts["CROWD"] = now
-
-            email_alerter.send_alert("CROWD", person_count)
-
-            st.session_state.active_alert = "CROWD"
-
-    else:
-        # Reset alert display if hazards have cleared (debounced with grace period to prevent flickering)
-        if st.session_state.get("active_alert") is not None:
-            if st.session_state.hazard_clear_ts is None:
-                st.session_state.hazard_clear_ts = now
-            elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
-                alert_pos.empty()
-                audio_pos.empty()
-                st.session_state.active_alert = None
-                st.session_state.hazard_clear_ts = None
-
-
-# Streamlit non-blocking live update mechanism
-if hasattr(st, "fragment"):
-    @st.fragment(run_every=0.5)
-    def live_monitoring_fragment():
-        update_live_monitoring()
-
-    live_monitoring_fragment()
-else:
-    update_live_monitoring()
-    if st.session_state.system_armed:
-        time.sleep(0.5)
-        st.rerun()
