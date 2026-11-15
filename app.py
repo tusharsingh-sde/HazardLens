@@ -14,6 +14,14 @@ from dotenv import load_dotenv
 # ── RESEND EMAIL ALERT SERVICE ──
 from alerts.email_alerts import EmailAlerter
 
+# ── SECURITY & VALIDATION UTILITIES ──
+from utils.security import (
+    validate_stream_url,
+    verify_operator_pin,
+    verify_model_hash,
+    DEFAULT_BEST_PT_SHA256,
+)
+
 # Load environment variables from .env
 load_dotenv()
 
@@ -342,6 +350,7 @@ section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
 # STATE MANAGEMENT
 # ─────────────────────────────────────────────────────────────────────────────
 if 'system_armed'     not in st.session_state: st.session_state.system_armed     = False
+if 'is_operator'      not in st.session_state: st.session_state.is_operator      = False
 if 'do_clear_alert'   not in st.session_state: st.session_state.do_clear_alert   = False
 if 'active_alert'     not in st.session_state: st.session_state.active_alert     = None
 if 'hazard_clear_ts'  not in st.session_state: st.session_state.hazard_clear_ts  = None
@@ -350,10 +359,15 @@ if 'last_audio_ts'    not in st.session_state: st.session_state.last_audio_ts   
 if 'camera_worker'    not in st.session_state: st.session_state.camera_worker    = None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODEL LOADING  (cached for zero-lag reloads)
+# MODEL LOADING  (cached for zero-lag reloads with SHA-256 integrity check)
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_twin_models():
+    # Model integrity check to mitigate pickle deserialization risks (RCE)
+    ok, val = verify_model_hash('best.pt')
+    if not ok:
+        st.error(f"🚨 CRITICAL SECURITY ALERT: Model integrity verification failed: {val}")
+        st.stop()
     fire_mod = YOLO('best.pt')      # Custom Fire / Smoke model
     base_mod = YOLO('yolov8n.pt')   # Standard model for crowd counting
     return fire_mod, base_mod
@@ -363,6 +377,10 @@ fire_model, base_model = load_twin_models()
 # ─────────────────────────────────────────────────────────────────────────────
 # CALLBACKS
 # ─────────────────────────────────────────────────────────────────────────────
+def lock_operator():
+    st.session_state.is_operator = False
+    st.toast("🔒 Operator session locked.")
+
 def dummy_silence(cam_name):
     st.toast(f"ℹ️ {cam_name} is on STANDBY — no active alerts to silence.")
 
@@ -571,19 +589,66 @@ class CameraWorker:
 with st.sidebar:
     st.markdown('<div class="sb-title">⬡ Control Panel</div>', unsafe_allow_html=True)
 
+    # ── OPERATOR PASSKEY / AUTHENTICATION GATE ──
+    st.markdown('<div class="sb-lbl">▸ Operator Access Gate</div>', unsafe_allow_html=True)
+    if st.session_state.is_operator:
+        col_auth1, col_auth2 = st.columns([2, 1])
+        with col_auth1:
+            st.markdown('<div class="sb-rn" style="color:var(--ok);padding-top:8px;">🟢 AUTHENTICATED</div>', unsafe_allow_html=True)
+        with col_auth2:
+            st.button("🔒 Lock", on_click=lock_operator, use_container_width=True)
+    else:
+        pin_val = st.text_input(
+            "Operator PIN",
+            type="password",
+            placeholder="Enter Operator PIN...",
+            key="pin_gate_input",
+            label_visibility="collapsed"
+        )
+        if st.button("🔓 Unlock Controls", key="btn_unlock_pin", use_container_width=True):
+            expected_pin = os.getenv("HAZARDLENS_OPERATOR_PIN", "1234")
+            if verify_operator_pin(pin_val, expected_pin):
+                st.session_state.is_operator = True
+                st.toast("✅ Operator authenticated successfully.")
+                st.rerun()
+            else:
+                st.error("❌ Invalid PIN. Access denied.")
+
+    # ── FEED SOURCE & SSRF VALIDATION ──
     st.markdown('<div class="sb-lbl">▸ Feed Source</div>', unsafe_allow_html=True)
-    ip_url = st.text_input(
-        "IP Camera Stream URL",
-        "http://192.168.1.7:8080/video",
+    feed_mode = st.radio(
+        "Source Type",
+        ["Live IP Camera", "Offline Demo Mode"],
+        index=0,
+        horizontal=True,
         label_visibility="collapsed"
     )
+    if feed_mode == "Offline Demo Mode":
+        ip_url = "assets/demo_feed.mp4"
+        st.caption("🎬 Playing offline demo stream (`assets/demo_feed.mp4`)")
+    else:
+        raw_ip = st.text_input(
+            "IP Camera Stream URL",
+            "http://192.168.1.7:8080/video",
+            disabled=not st.session_state.is_operator,
+            label_visibility="collapsed"
+        )
+        valid_ok, valid_res = validate_stream_url(raw_ip, allow_demo=True)
+        if not valid_ok:
+            st.error(f"⚠️ Security: {valid_res}")
+            ip_url = "assets/demo_feed.mp4"
+        else:
+            ip_url = valid_res
 
+    # ── SYSTEM CONTROL (OPERATOR GATED) ──
     st.markdown('<div class="sb-lbl">▸ System Control</div>', unsafe_allow_html=True)
+    if not st.session_state.is_operator:
+        st.caption("🔒 Unlock Operator Gate to ARM / DISARM system.")
     ca, cb = st.columns(2)
     with ca:
-        st.button("🔴 ARM",    on_click=arm_system,    use_container_width=True)
+        st.button("🔴 ARM",    on_click=arm_system,    disabled=not st.session_state.is_operator, use_container_width=True)
     with cb:
-        st.button("⬛ DISARM", on_click=disarm_system, use_container_width=True)
+        st.button("⬛ DISARM", on_click=disarm_system, disabled=not st.session_state.is_operator, use_container_width=True)
 
     st.markdown('<div class="sb-lbl">▸ Camera Status</div>', unsafe_allow_html=True)
     armed_now = st.session_state.system_armed
@@ -610,16 +675,20 @@ with st.sidebar:
         </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="sb-lbl">▸ System Info</div>', unsafe_allow_html=True)
+    auth_label = "OPERATOR (UNLOCKED)" if st.session_state.is_operator else "READ-ONLY (LOCKED)"
     st.markdown(f"""
     <div class="sysinfo">
     LOCATION &nbsp;&nbsp; : MIET CAMPUS<br>
+    ACCESS &nbsp;&nbsp;&nbsp;&nbsp; : {auth_label}<br>
+    INTEGRITY &nbsp; : SHA-256 VERIFIED<br>
     AI ENGINES : TWIN (FIRE + CROWD)<br>
     TTS ENGINE : EDGE-TTS (HINDI NEURAL)<br>
     LANGUAGE &nbsp;&nbsp; : HI-IN<br>
     FRAME SKIP : {FRAME_SKIP} FRAMES<br>
     CROWD LIM &nbsp;: {CROWD_THRESHOLD} PERSONS<br>
     CONF THRESH: {FIRE_CONF_THRESHOLD}<br>
-    COOLDOWN &nbsp;&nbsp;: {EMAIL_COOLDOWN_SEC}s
+    COOLDOWN &nbsp;&nbsp;: {EMAIL_COOLDOWN_SEC}s<br>
+    SILENCE &nbsp;&nbsp;&nbsp;: {SILENCE_DURATION_SEC}s
     </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -651,6 +720,10 @@ st.markdown(f"""
     <div class="stat-pill">
       <span class="stat-v">{CROWD_THRESHOLD}</span>
       <span class="stat-l">Crowd Lim</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-v" style="font-size:13px;color:{'var(--ok)' if st.session_state.is_operator else 'var(--mute)'};">{'OP' if st.session_state.is_operator else 'VIEW'}</span>
+      <span class="stat-l">Access</span>
     </div>
     <div class="{arm_cls}">
       <span class="{dot_cls}"></span>{arm_txt}
@@ -706,6 +779,7 @@ with col1:
     feed_01_frame.image(create_placeholder("CAM 01"), use_container_width=True)
 
     st.button("🔕 Silence CAM 01", key="silence_1",
+              disabled=not st.session_state.is_operator,
               on_click=silence_alerts, use_container_width=True)
 
 with col2:
@@ -722,6 +796,7 @@ with col2:
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
     st.image(create_placeholder("CAM 02"), use_container_width=True)
     st.button("🔕 Silence CAM 02", key="silence_2",
+              disabled=not st.session_state.is_operator,
               on_click=dummy_silence, args=("CAM 02",), use_container_width=True)
 
 col3, col4 = st.columns(2)
@@ -740,6 +815,7 @@ with col3:
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
     st.image(create_placeholder("CAM 03"), use_container_width=True)
     st.button("🔕 Silence CAM 03", key="silence_3",
+              disabled=not st.session_state.is_operator,
               on_click=dummy_silence, args=("CAM 03",), use_container_width=True)
 
 with col4:
@@ -756,6 +832,7 @@ with col4:
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
     st.image(create_placeholder("CAM 04"), use_container_width=True)
     st.button("🔕 Silence CAM 04", key="silence_4",
+              disabled=not st.session_state.is_operator,
               on_click=dummy_silence, args=("CAM 04",), use_container_width=True)
 
 # ─────────────────────────────────────────────────────────────────────────────

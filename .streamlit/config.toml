@@ -1,0 +1,11 @@
+[server]
+enableCORS = true
+enableXsrfProtection = true
+maxUploadSize = 5
+
+[client]
+showErrorDetails = false
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
