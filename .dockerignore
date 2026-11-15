@@ -1,0 +1,40 @@
+# Version control
+.git
+.gitignore
+
+# Environment secrets & virtual environments
+.env
+venv/
+.venv/
+
+# Python cache & compiled bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Tests & test caches
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor configurations & artifacts
+.vscode/
+.idea/
+*.swp
+*.bak
+
+# Documentation
+README.md
+README_2.md
+
+# Stale models and generated audio caches
+old_best.pt
+*.mp3
+
+# Ensure critical application assets are included
+!assets/demo_feed.mp4
+!best.pt
+!yolov8n.pt
+!.streamlit/config.toml
