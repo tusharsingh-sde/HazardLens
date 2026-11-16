@@ -4,6 +4,7 @@
 
 # Environment secrets & virtual environments
 .env
+config/paired_cameras.json
 venv/
 .venv/
 

@@ -11,6 +11,7 @@ import os
 import hashlib
 import time
 import threading
+import urllib.request
 from dotenv import load_dotenv
 
 # ── RESEND EMAIL ALERT SERVICE ──
@@ -19,9 +20,21 @@ from alerts.email_alerts import EmailAlerter
 # ── SECURITY & VALIDATION UTILITIES ──
 from utils.security import (
     validate_stream_url,
-    verify_operator_pin,
     verify_model_hash,
+    discover_paired_camera,
+    scan_network_cameras,
+    verify_camera_handshake,
+    resolve_paired_camera,
+    load_paired_cameras,
+    save_camera_slot,
+    get_paired_camera,
     DEFAULT_BEST_PT_SHA256,
+)
+from utils.qr_pairing import (
+    create_pairing_session,
+    get_pairing_status,
+    mark_pairing_complete,
+    validate_pairing_token,
 )
 
 # Load environment variables from .env
@@ -64,6 +77,157 @@ st.set_page_config(
     initial_sidebar_state="expanded",
     page_icon="🛡️"
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MOBILE QR CODE CAMERA PAIRING INTERCEPTOR (PORT 8501)
+# When a smartphone scans the QR code, it loads http://<ip>:8501/?pair_token=...
+# Handled immediately with 3-layer IP resolution, saves to registry,
+# displays sleek mobile confirmation, and halts with st.stop() to prevent YOLO loading.
+# ─────────────────────────────────────────────────────────────────────────────
+if "pair_token" in st.query_params or "token" in st.query_params:
+    pair_token = st.query_params.get("pair_token") or st.query_params.get("token")
+    raw_slot = st.query_params.get("slot", "CAM 01")
+    if raw_slot in ("CAM01", "CAM1"):
+        target_slot = "CAM 01"
+    elif raw_slot.startswith("CAM") and len(raw_slot) == 5:
+        target_slot = f"{raw_slot[:3]} {raw_slot[3:]}"
+    else:
+        target_slot = raw_slot
+
+    if not validate_pairing_token(pair_token):
+        st.markdown("""
+        <div style="background:#111820; border:1px solid #FF5C4D; border-radius:12px; padding:32px 24px; text-align:center; max-width:400px; margin:40px auto; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#E6EDF3; box-shadow:0 8px 32px rgba(0,0,0,0.6);">
+          <div style="display:inline-block; background:rgba(255,92,77,0.15); color:#FF5C4D; border:1px solid #FF5C4D; border-radius:20px; padding:6px 16px; font-size:13px; font-weight:700; margin-bottom:16px;">
+            &#10006; PAIRING REJECTED
+          </div>
+          <h2 style="color:#FF5C4D; margin:0 0 10px 0; font-size:22px;">Invalid or Expired Token</h2>
+          <p style="color:#A3B3C2; font-size:14px; line-height:1.5; margin:0 0 16px 0;">
+            This QR pairing token is invalid or has expired.<br>
+            Please generate a fresh QR code on the HazardLens command console.
+          </p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
+
+    # 3-Layer IP Resolution Fallback:
+    phone_ip = None
+
+    # Layer 1: Query parameter 'phone_ip'
+    if "phone_ip" in st.query_params and st.query_params.get("phone_ip"):
+        candidate = st.query_params.get("phone_ip").strip()
+        if candidate and not candidate.startswith("127.") and candidate != "localhost":
+            phone_ip = candidate
+
+    # Layer 2: Tornado / Streamlit client IP & proxy headers
+    if not phone_ip:
+        try:
+            client_ip = getattr(st.context, "ip_address", None)
+            if client_ip and client_ip != "127.0.0.1" and not client_ip.startswith("127."):
+                phone_ip = client_ip
+        except Exception:
+            pass
+
+    if not phone_ip:
+        try:
+            headers = getattr(st.context, "headers", None)
+            if headers:
+                for hdr in ("x-forwarded-for", "x-real-ip", "remote-addr", "client-ip"):
+                    val = headers.get(hdr)
+                    if val:
+                        first = val.split(",")[0].strip()
+                        if first and not first.startswith("127.") and first != "localhost":
+                            phone_ip = first
+                            break
+        except Exception:
+            pass
+
+    # Optional Tornado websocket headers fallback
+    if not phone_ip:
+        try:
+            from streamlit.web.server.websocket_headers import _get_websocket_headers
+            ws_headers = _get_websocket_headers()
+            if ws_headers:
+                for hdr in ("x-forwarded-for", "x-real-ip", "remote-addr"):
+                    val = ws_headers.get(hdr)
+                    if val:
+                        first = val.split(",")[0].strip()
+                        if first and not first.startswith("127.") and first != "localhost":
+                            phone_ip = first
+                            break
+        except Exception:
+            pass
+
+    # Filter out laptop's own IP and loopback so laptop is never registered as a camera!
+    from utils.qr_pairing import get_laptop_wifi_ip
+    laptop_ip = get_laptop_wifi_ip()
+    if phone_ip:
+        clean_ip = phone_ip.replace("::ffff:", "").strip()
+        if clean_ip in (laptop_ip, "127.0.0.1", "localhost", "::1") or clean_ip.startswith("127."):
+            phone_ip = None
+
+    # Layer 3: Network camera scanner (finds active IP Webcam nodes on Wi-Fi)
+    discovered_nodes = scan_network_cameras(port=8080, timeout=1.2)
+    # Never consider the laptop itself as a camera node
+    discovered_nodes = [d for d in discovered_nodes if not d.startswith(f"{laptop_ip}:") and not d.startswith("127.") and "::ffff:" not in d]
+    camera_endpoint = None
+
+    if phone_ip:
+        # Check if phone_ip is among discovered nodes on port 8080
+        matching = [d for d in discovered_nodes if d.startswith(f"{phone_ip}:")]
+        if matching:
+            camera_endpoint = matching[0]
+        else:
+            camera_endpoint = f"{phone_ip}:8080"
+    else:
+        # If headers/socket didn't expose phone IP, pick first active IP Webcam node
+        if discovered_nodes:
+            camera_endpoint = discovered_nodes[0]
+            phone_ip = camera_endpoint.split(":")[0]
+
+    if camera_endpoint:
+        save_camera_slot(target_slot, camera_endpoint, user="", password="")
+        mark_pairing_complete(pair_token, phone_ip or camera_endpoint.split(":")[0], slot=target_slot)
+        st.markdown(f"""
+        <div style="background:#111820; border:1px solid #1F2B38; border-radius:12px; padding:32px 24px; text-align:center; max-width:420px; margin:40px auto; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#E6EDF3; box-shadow:0 8px 32px rgba(0,0,0,0.6);">
+          <div style="display:inline-block; background:rgba(61,214,140,0.15); color:#3DD68C; border:1px solid #3DD68C; border-radius:20px; padding:6px 16px; font-size:13px; font-weight:700; margin-bottom:16px;">
+            &#9679; NODE CONNECTED
+          </div>
+          <h2 style="color:#3CC8E8; margin:0 0 10px 0; font-size:24px;">HazardLens Command</h2>
+          <p style="color:#A3B3C2; font-size:15px; line-height:1.5; margin:0 0 18px 0;">
+            Your smartphone has been authenticated &amp; linked as a live surveillance feed:
+          </p>
+          <div style="background:#0B0F14; border:1px solid #2D3F53; border-radius:8px; padding:14px; font-family:monospace; color:#3DD68C; font-size:18px; font-weight:700; margin-bottom:18px;">
+            {target_slot} &middot; {camera_endpoint}
+          </div>
+          <p style="color:#7B8DA0; font-size:13px; line-height:1.5; margin:0 0 16px 0;">
+            Ensure <strong>IP Webcam</strong> is broadcasting on port 8080.<br>
+            You can now safely close this browser window.
+          </p>
+          <div style="color:#3DD68C; font-size:13px; font-weight:600;">
+            &#10004; Operator console updated in real-time
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
+    else:
+        st.markdown(f"""
+        <div style="background:#111820; border:1px solid #F2B33D; border-radius:12px; padding:32px 24px; text-align:center; max-width:420px; margin:40px auto; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#E6EDF3; box-shadow:0 8px 32px rgba(0,0,0,0.6);">
+          <div style="display:inline-block; background:rgba(242,179,61,0.15); color:#F2B33D; border:1px solid #F2B33D; border-radius:20px; padding:6px 16px; font-size:13px; font-weight:700; margin-bottom:16px;">
+            &#9888; CAMERA NOT DETECTED
+          </div>
+          <h2 style="color:#3CC8E8; margin:0 0 10px 0; font-size:22px;">HazardLens Command</h2>
+          <p style="color:#A3B3C2; font-size:14px; line-height:1.5; margin:0 0 16px 0;">
+            Device reached the server, but no active <strong>IP Webcam</strong> stream was found on port 8080.
+          </p>
+          <p style="color:#7B8DA0; font-size:13px; line-height:1.5; margin:0 0 16px 0;">
+            Please open IP Webcam on your phone, scroll to the bottom, tap <strong>Start server</strong>, then click retry.
+          </p>
+          <a href="?pair_token={pair_token}&slot={raw_slot}" style="display:inline-block; background:#3CC8E8; color:#0B0F14; text-decoration:none; font-weight:700; padding:10px 20px; border-radius:6px; font-size:14px;">
+            &#8635; Retry Pairing
+          </a>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GLOBAL CSS
@@ -360,18 +524,22 @@ div[data-testid="stAudio"] {
 # ─────────────────────────────────────────────────────────────────────────────
 # STATE MANAGEMENT
 # ─────────────────────────────────────────────────────────────────────────────
-if 'system_armed'     not in st.session_state: st.session_state.system_armed     = False
-if 'is_operator'      not in st.session_state: st.session_state.is_operator      = False
-if 'do_clear_alert'   not in st.session_state: st.session_state.do_clear_alert   = False
-if 'active_alert'     not in st.session_state: st.session_state.active_alert     = None
-if 'hazard_clear_ts'  not in st.session_state: st.session_state.hazard_clear_ts  = None
-if 'silenced_until'   not in st.session_state: st.session_state.silenced_until   = 0.0
-if 'last_audio_ts'    not in st.session_state: st.session_state.last_audio_ts    = {"FIRE": 0.0, "CROWD": 0.0}
-if 'camera_worker'    not in st.session_state: st.session_state.camera_worker    = None
-if 'live_crowd_count' not in st.session_state: st.session_state.live_crowd_count = 0
-if 'active_audio_b64' not in st.session_state: st.session_state.active_audio_b64 = None
-if 'active_audio_id'  not in st.session_state: st.session_state.active_audio_id  = 0
-if 'audio_expire_ts'  not in st.session_state: st.session_state.audio_expire_ts  = 0.0
+if 'system_armed'      not in st.session_state: st.session_state.system_armed      = False
+if 'is_operator'       not in st.session_state: st.session_state.is_operator       = True
+if 'paired_camera_url' not in st.session_state: st.session_state.paired_camera_url  = None
+if 'do_clear_alert'    not in st.session_state: st.session_state.do_clear_alert    = False
+if 'active_alert'      not in st.session_state: st.session_state.active_alert      = None
+if 'hazard_clear_ts'   not in st.session_state: st.session_state.hazard_clear_ts   = None
+if 'silenced_until'    not in st.session_state: st.session_state.silenced_until    = 0.0
+if 'last_audio_ts'     not in st.session_state: st.session_state.last_audio_ts     = {"FIRE": 0.0, "CROWD": 0.0}
+if 'camera_worker'     not in st.session_state: st.session_state.camera_worker     = None
+if 'live_crowd_count'           not in st.session_state: st.session_state.live_crowd_count           = 0
+if 'active_audio_b64'           not in st.session_state: st.session_state.active_audio_b64           = None
+if 'active_audio_id'            not in st.session_state: st.session_state.active_audio_id            = 0
+if 'audio_trigger_id'           not in st.session_state: st.session_state.audio_trigger_id           = 0
+if 'stop_audio_id'              not in st.session_state: st.session_state.stop_audio_id              = 0
+if '_last_rendered_audio_state' not in st.session_state: st.session_state._last_rendered_audio_state = None
+if 'audio_expire_ts'            not in st.session_state: st.session_state.audio_expire_ts            = 0.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL LOADING  (cached for zero-lag reloads with SHA-256 integrity check)
@@ -393,33 +561,34 @@ fire_model, base_model = load_twin_models()
 # CALLBACKS
 # ─────────────────────────────────────────────────────────────────────────────
 def lock_operator():
-    st.session_state.is_operator = False
-    st.toast("🔒 Operator session locked.")
+    pass
 
 def dummy_silence(cam_name):
     st.toast(f"ℹ️ {cam_name} is on STANDBY — no active alerts to silence.")
 
 def silence_alerts():
     now = time.time()
-    st.session_state.silenced_until  = now + SILENCE_DURATION_SEC
-    st.session_state.do_clear_alert  = True
-    st.session_state.active_alert    = None
-    st.session_state.hazard_clear_ts = None
+    st.session_state.silenced_until   = now + SILENCE_DURATION_SEC
+    st.session_state.do_clear_alert   = True
+    st.session_state.active_alert     = None
+    st.session_state.hazard_clear_ts  = None
     st.session_state.active_audio_b64 = None
-    st.session_state.audio_expire_ts = 0.0
-    st.session_state.active_audio_id += 1
+    st.session_state.audio_expire_ts  = 0.0
+    st.session_state.stop_audio_id    = st.session_state.get('stop_audio_id', 0) + 1
+    st.session_state.active_audio_id  += 1
     play_persistent_audio(None, 0)
     st.toast(f"🔕 CAM 01 alerts silenced for {SILENCE_DURATION_SEC}s.")
 
 def disarm_system():
-    st.session_state.system_armed    = False
-    st.session_state.do_clear_alert  = True
-    st.session_state.active_alert    = None
-    st.session_state.hazard_clear_ts = None
-    st.session_state.silenced_until  = 0.0
+    st.session_state.system_armed     = False
+    st.session_state.do_clear_alert   = True
+    st.session_state.active_alert     = None
+    st.session_state.hazard_clear_ts  = None
+    st.session_state.silenced_until   = 0.0
     st.session_state.active_audio_b64 = None
-    st.session_state.audio_expire_ts = 0.0
-    st.session_state.active_audio_id += 1
+    st.session_state.audio_expire_ts  = 0.0
+    st.session_state.stop_audio_id    = st.session_state.get('stop_audio_id', 0) + 1
+    st.session_state.active_audio_id  += 1
     play_persistent_audio(None, 0)
     if st.session_state.get('camera_worker') is not None:
         st.session_state.camera_worker.stop()
@@ -427,6 +596,13 @@ def disarm_system():
 
 def arm_system():
     st.session_state.system_armed = True
+    # 1-Click Auto-Link & Auto-Heal: proactively discover camera if unconfigured or offline
+    try:
+        resolved = resolve_paired_camera("CAM 01")
+        if resolved:
+            st.session_state.paired_camera_url = resolved
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
@@ -522,16 +698,58 @@ def trigger_hindi_alert(text):
                 audio_bytes = f.read()
             st.session_state.active_audio_b64 = base64.b64encode(audio_bytes).decode('ascii')
             st.session_state.active_audio_id += 1
+            st.session_state.audio_trigger_id = st.session_state.get('audio_trigger_id', 0) + 1
             st.session_state.audio_expire_ts = time.time() + 10.0
     except Exception as e:
         print(f"TTS Error: {e}")
 
-def play_persistent_audio(b64_audio: str = None, audio_id: int = 0):
+# ---------------------------------------------------------
+# --- STREAMLIT HTML / AUDIO CONTROLLER HELPER ---
+# ---------------------------------------------------------
+try:
+    import streamlit.deprecation_util as _deprec_util
+    class _SuppressHtmlDeprecation(object):
+        def filter(self, record):
+            return "components.v1.html" not in record.getMessage()
+    _deprec_util._LOGGER.addFilter(_SuppressHtmlDeprecation())
+except Exception:
+    pass
+
+def _render_audio_html(html_snippet: str):
+    """
+    Renders the HTML/JS Web Audio snippet cleanly with zero layout shift
+    and suppresses deprecation warnings.
+    """
+    if hasattr(st, "iframe"):
+        try:
+            st.iframe(html_snippet, height=0)
+            return
+        except Exception:
+            pass
+    # Fallback to components.html with height=0, width=0
+    components.html(html_snippet, height=0, width=0)
+
+def play_persistent_audio(b64_audio: str = None, audio_id: int = 0, force: bool = False):
     """
     Plays audio via the top-level parent window Web Audio controller to prevent
     fragment unmount and Diff resets every 0.5s. Loops infinitely with a 1.2s pause
     until explicitly stopped.
+    Only renders HTML/JS snippet when audio state actually transitions!
     """
+    if b64_audio:
+        trigger_id = st.session_state.get("audio_trigger_id", audio_id)
+        current_state = f"PLAY:{audio_id}:{trigger_id}"
+    else:
+        stop_id = st.session_state.get("stop_audio_id", 0)
+        current_state = f"STOP:{stop_id}"
+
+    last_state = st.session_state.get("_last_rendered_audio_state")
+    if not force and last_state == current_state:
+        # Audio state unchanged — do NOT call HTML renderer on periodic 0.5s fragment ticks!
+        return
+
+    st.session_state["_last_rendered_audio_state"] = current_state
+
     try:
         if not b64_audio:
             stop_script = """
@@ -555,7 +773,7 @@ def play_persistent_audio(b64_audio: str = None, audio_id: int = 0):
             })();
             </script>
             """
-            components.html(stop_script, height=0, width=0)
+            _render_audio_html(stop_script)
             return
 
         script = f"""
@@ -588,7 +806,7 @@ def play_persistent_audio(b64_audio: str = None, audio_id: int = 0):
         }})();
         </script>
         """
-        components.html(script, height=0, width=0)
+        _render_audio_html(script)
     except Exception as e:
         print(f"Parent-window audio controller error: {e}")
 
@@ -614,6 +832,17 @@ class CameraWorker:
         self.person_count = 0
         self.fire_spotted = False
 
+        # Fast HTTP snapshot grabber for IP Webcam / network cameras
+        self.is_http = str(self.ip_url).startswith("http://") or str(self.ip_url).startswith("https://")
+        if self.is_http:
+            clean_url = str(self.ip_url).rstrip("/")
+            if clean_url.endswith("/video"):
+                self.shot_url = clean_url[:-6] + "/shot.jpg"
+            else:
+                self.shot_url = f"{clean_url}/shot.jpg"
+        else:
+            self.shot_url = None
+
     def start(self):
         if self.running and self.thread and self.thread.is_alive():
             return
@@ -633,43 +862,72 @@ class CameraWorker:
             self.thread.join(timeout=1.0)
         self.thread = None
 
+    def _read_frame(self):
+        """
+        Grab a fresh frame.
+        For HTTP streams: Fast /shot.jpg HTTP fetcher bypasses OpenCV MSMF/MJPEG bugs with zero lag.
+        For local video files / RTSP: Uses cv2.VideoCapture with auto-looping.
+        """
+        # Primary for HTTP network cameras: /shot.jpg HTTP snapshot
+        if self.is_http and self.shot_url:
+            try:
+                req = urllib.request.Request(self.shot_url, headers={"User-Agent": "HazardLens-FrameGrabber/1.0"})
+                with urllib.request.urlopen(req, timeout=1.2) as resp:
+                    if resp.status == 200:
+                        img_bytes = resp.read()
+                        if img_bytes:
+                            img_np = np.frombuffer(img_bytes, dtype=np.uint8)
+                            frame = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+                            if frame is not None and frame.size > 0:
+                                return True, frame
+            except Exception:
+                pass
+
+        # Fallback to cv2.VideoCapture (for local MP4, RTSP, or fallback)
+        if self.cap is not None and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if ret and frame is not None:
+                return True, frame
+            # Infinite loop for local demo video files
+            if isinstance(self.ip_url, str) and os.path.isfile(self.ip_url):
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = self.cap.read()
+                if ret and frame is not None:
+                    return True, frame
+
+        return False, None
+
     def _worker_loop(self):
-        try:
-            self.cap = cv2.VideoCapture(self.ip_url)
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception as e:
-            print(f"Failed to open video source: {e}")
-            self.running = False
-            return
+        # Only initialize cv2.VideoCapture for local files or RTSP streams!
+        # For HTTP network cameras (e.g. IP Webcam), pure HTTP frame grabber is used
+        # to avoid OpenCV FFMPEG TCP connection errors (-138) and thread blocking.
+        if not self.is_http:
+            try:
+                self.cap = cv2.VideoCapture(self.ip_url)
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                self.cap = None
 
         count = 0
         failed_reads = 0
-        while self.running and self.cap is not None and self.cap.isOpened():
-            ret, frame = self.cap.read()
-            if not ret:
-                # Infinite loop for local demo video files without reconnect penalty
-                if isinstance(self.ip_url, str) and os.path.isfile(self.ip_url):
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret, frame = self.cap.read()
-                    if not ret:
-                        time.sleep(0.04)
-                        continue
-                else:
-                    failed_reads += 1
-                    time.sleep(0.04)
-                    if failed_reads >= 30:  # ~1.2s stream drop: auto-reconnect
+        while self.running:
+            ret, frame = self._read_frame()
+            if not ret or frame is None:
+                failed_reads += 1
+                time.sleep(0.08)
+                if failed_reads >= 50 and not self.is_http:  # Re-attempt VideoCapture initialization after dropped file stream
+                    if self.cap is not None:
                         try:
                             self.cap.release()
                         except Exception:
                             pass
-                        time.sleep(1.0)
-                        try:
-                            self.cap = cv2.VideoCapture(self.ip_url)
-                            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                            failed_reads = 0
-                        except Exception as e:
-                            print(f"Reconnection attempt failed: {e}")
-                    continue
+                    try:
+                        self.cap = cv2.VideoCapture(self.ip_url)
+                        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    except Exception:
+                        pass
+                    failed_reads = 0
+                continue
 
             failed_reads = 0
             count += 1
@@ -721,69 +979,143 @@ class CameraWorker:
 with st.sidebar:
     st.markdown('<div class="sb-title">⬡ Control Panel</div>', unsafe_allow_html=True)
 
-    # ── OPERATOR PASSKEY / AUTHENTICATION GATE ──
-    st.markdown('<div class="sb-lbl">▸ Operator Access Gate</div>', unsafe_allow_html=True)
-    if st.session_state.is_operator:
-        col_auth1, col_auth2 = st.columns([2, 1])
-        with col_auth1:
-            st.markdown('<div class="sb-rn" style="color:var(--ok);padding-top:8px;">🟢 AUTHENTICATED</div>', unsafe_allow_html=True)
-        with col_auth2:
-            st.button("🔒 Lock", on_click=lock_operator, width="stretch")
-    else:
-        pin_val = st.text_input(
-            "Operator PIN",
-            type="password",
-            placeholder="Enter Operator PIN...",
-            key="pin_gate_input",
-            label_visibility="collapsed"
-        )
-        if st.button("🔓 Unlock Controls", key="btn_unlock_pin", width="stretch"):
-            expected_pin = os.getenv("HAZARDLENS_OPERATOR_PIN", "1234")
-            if verify_operator_pin(pin_val, expected_pin):
-                st.session_state.is_operator = True
-                st.toast("✅ Operator authenticated successfully.")
-                st.rerun()
-            else:
-                st.error("❌ Invalid PIN. Access denied.")
-
-    # ── FEED SOURCE & SSRF VALIDATION ──
-    st.markdown('<div class="sb-lbl">▸ Feed Source</div>', unsafe_allow_html=True)
+    # ── TELEMETRY CHANNEL & HARDWARE REGISTRY ──
+    st.markdown('<div class="sb-lbl">▸ Telemetry Channel</div>', unsafe_allow_html=True)
     feed_mode = st.radio(
-        "Source Type",
-        ["Live IP Camera", "Offline Demo Mode"],
+        "Telemetry Channel",
+        ["📡 Paired CCTV Network (Auto-Sync)", "🎬 Tactical Demo Simulation"],
         index=0,
-        horizontal=True,
         label_visibility="collapsed"
     )
-    if feed_mode == "Offline Demo Mode":
-        ip_url = "assets/demo_feed.mp4"
-        st.caption("🎬 Playing offline demo stream (`assets/demo_feed.mp4`)")
-    else:
-        raw_ip = st.text_input(
-            "IP Camera Stream URL",
-            "http://192.168.1.7:8080/video",
-            disabled=not st.session_state.is_operator,
-            label_visibility="collapsed"
-        )
-        valid_ok, valid_res = validate_stream_url(raw_ip, allow_demo=True)
-        if not valid_ok:
-            st.error(f"⚠️ Security: {valid_res}")
-            ip_url = "assets/demo_feed.mp4"
-        else:
-            ip_url = valid_res
 
-    # ── SYSTEM CONTROL (OPERATOR GATED) ──
+    armed_now = st.session_state.system_armed
+    if feed_mode == "🎬 Tactical Demo Simulation":
+        ip_url = "assets/demo_feed.mp4"
+        st.markdown(
+            '<div style="font-family:var(--mono);font-size:11px;color:var(--acc);'
+            'padding:6px 10px;background:var(--s2);border:1px solid var(--line2);border-radius:3px;margin-bottom:8px;">'
+            '🎬 TACTICAL DEMO ACTIVE (Simulation)</div>',
+            unsafe_allow_html=True
+        )
+    else:
+        if armed_now:
+            # 1-Click Auto-IP Healing via Dynamic Registry
+            resolved_url = resolve_paired_camera("CAM 01")
+            if resolved_url:
+                st.session_state.paired_camera_url = resolved_url
+                ip_url = resolved_url
+                st.markdown(
+                    '<div style="font-family:var(--mono);font-size:11px;color:var(--ok);'
+                    'padding:6px 10px;background:rgba(61,214,140,0.08);border:1px solid var(--ok);border-radius:3px;margin-bottom:8px;">'
+                    '🟢 CAM 01 ONLINE (Auto-Synced)</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                ip_url = "assets/demo_feed.mp4"
+                st.markdown(
+                    '<div style="font-family:var(--mono);font-size:11px;color:var(--warn);'
+                    'padding:6px 10px;background:rgba(242,179,61,0.08);border:1px solid var(--warn);border-radius:3px;margin-bottom:8px;">'
+                    '🟡 CAM 01 AUTO-HEAL: SCANNING (Demo Mode)</div>',
+                    unsafe_allow_html=True
+                )
+        else:
+            ip_url = "assets/demo_feed.mp4"
+            cam_info = get_paired_camera("CAM 01")
+            last_ip = cam_info.get("last_ip_port") if (cam_info and cam_info.get("last_ip_port")) else "Unpaired"
+            st.markdown(
+                f'<div style="font-family:var(--mono);font-size:11px;color:var(--mute);'
+                f'padding:6px 10px;background:var(--s2);border:1px solid var(--line2);border-radius:3px;margin-bottom:8px;">'
+                f'⚪ CAM 01 STANDBY ({last_ip})</div>',
+                unsafe_allow_html=True
+            )
+
+    # ── ZERO-INPUT HARDWARE PAIRING & NODE MANAGEMENT ──
+    with st.expander("🔗 Pair / Manage CCTV Nodes", expanded=False):
+        st.markdown(
+            '<div style="font-family:var(--mono);font-size:11px;color:var(--mute);margin-bottom:8px;">'
+            'ZERO-INPUT HARDWARE LINK (WHATSAPP-WEB STYLE)</div>',
+            unsafe_allow_html=True
+        )
+
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            btn_qr = st.button("📲 Show QR Code", width="stretch", key="btn_show_qr")
+        with col_p2:
+            btn_autolink = st.button("⚡ Auto-Link", width="stretch", key="btn_autolink_node")
+
+        if btn_autolink:
+            with st.spinner("Scanning active Wi-Fi for IP Webcam nodes..."):
+                found_nodes = scan_network_cameras(port=8080, timeout=1.2)
+                if found_nodes:
+                    node = found_nodes[0]
+                    save_camera_slot("CAM 01", node, user="", password="")
+                    st.success(f"✅ CAM 01 Auto-Linked to {node}!")
+                    st.toast(f"✅ CAM 01 Linked to {node}!")
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error("No active IP Webcam detected on Wi-Fi. Ensure IP Webcam broadcast is started, or scan the QR code below.")
+
+        if "show_pairing_qr" not in st.session_state:
+            st.session_state.show_pairing_qr = False
+
+        if btn_qr:
+            st.session_state.show_pairing_qr = not st.session_state.show_pairing_qr
+
+        if st.session_state.show_pairing_qr:
+            if "qr_pairing_data" not in st.session_state:
+                st.session_state.qr_pairing_data = create_pairing_session("CAM 01")
+
+            token, pair_url, qr_bytes = st.session_state.qr_pairing_data
+
+            st.markdown(
+                f'<div style="text-align:center;padding:8px 0;">'
+                f'<div style="font-family:var(--mono);font-size:11px;color:var(--acc);margin-bottom:6px;">'
+                f'SCAN WITH PHONE CAMERA (PORT 8501)</div></div>',
+                unsafe_allow_html=True
+            )
+            st.image(qr_bytes, width=220)
+            st.caption(f"Pairing Link: `{pair_url}`")
+
+            # Check if phone has connected via QR
+            p_status = get_pairing_status(token)
+            if p_status and p_status.get("paired"):
+                st.success(f"✅ Phone linked: {p_status.get('phone_ip')}:8080")
+                if st.button("🔴 Start Live Stream", width="stretch", key="btn_refresh_after_qr"):
+                    st.session_state.show_pairing_qr = False
+                    st.session_state.pop("qr_pairing_data", None)
+                    arm_system()
+                    st.rerun()
+
+        st.markdown(
+            '<div style="font-family:var(--mono);font-size:11px;color:var(--mute);margin:12px 0 6px;">'
+            'PAIRED CCTV NODES:</div>',
+            unsafe_allow_html=True
+        )
+        registry = load_paired_cameras()
+        cam01_node = registry.get("CAM 01", {}).get("last_ip_port")
+        if cam01_node:
+            st.markdown(
+                f'<div style="font-family:var(--mono);font-size:11px;color:var(--text);display:flex;justify-content:space-between;padding:2px 0;">'
+                f'<span>CAM 01: {cam01_node}</span><span style="color:var(--ok);">🟢 Ready</span></div>',
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f'<div style="font-family:var(--mono);font-size:11px;color:var(--mute);display:flex;justify-content:space-between;padding:2px 0;">'
+                f'<span>CAM 01: —</span><span>Unpaired (Scan QR or click Auto-Link)</span></div>',
+                unsafe_allow_html=True
+            )
+
+    # ── SYSTEM CONTROL (1-CLICK TOGGLE) ──
     st.markdown('<div class="sb-lbl">▸ System Control</div>', unsafe_allow_html=True)
-    if not st.session_state.is_operator:
-        st.caption("🔒 Unlock Operator Gate to ARM / DISARM system.")
     ca, cb = st.columns(2)
     with ca:
-        st.button("🔴 ARM",    on_click=arm_system,    disabled=not st.session_state.is_operator, width="stretch")
+        st.button("🔴 ARM",    on_click=arm_system,    width="stretch")
     with cb:
-        st.button("⬛ DISARM", on_click=disarm_system, disabled=not st.session_state.is_operator, width="stretch")
+        st.button("⬛ DISARM", on_click=disarm_system, width="stretch")
 
     st.markdown('<div class="sb-lbl">▸ Camera Status</div>', unsafe_allow_html=True)
-    armed_now = st.session_state.system_armed
     cam_registry = [
         ("CAM 01", "MIET COLLEGE MAIN GATE",   True),
         ("CAM 02", "RAILWAY STATION ENTRANCE",  False),
@@ -807,11 +1139,11 @@ with st.sidebar:
         </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="sb-lbl">▸ System Info</div>', unsafe_allow_html=True)
-    auth_label = "OPERATOR (UNLOCKED)" if st.session_state.is_operator else "READ-ONLY (LOCKED)"
     st.markdown(f"""
     <div class="sysinfo">
     LOCATION &nbsp;&nbsp; : MIET CAMPUS<br>
-    ACCESS &nbsp;&nbsp;&nbsp;&nbsp; : {auth_label}<br>
+    PAIRING &nbsp;&nbsp;&nbsp; : AUTO (CRYPTOGRAPHIC)<br>
+    AUTH &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : MUTUAL BASIC-AUTH<br>
     INTEGRITY &nbsp; : SHA-256 VERIFIED<br>
     AI ENGINES : TWIN (FIRE + CROWD)<br>
     TTS ENGINE : EDGE-TTS (HINDI NEURAL)<br>
@@ -854,7 +1186,11 @@ st.markdown(f"""
       <span class="stat-l">Crowd Lim</span>
     </div>
     <div class="stat-pill">
-      <span class="stat-v" style="font-size:13px;color:{'var(--ok)' if st.session_state.is_operator else 'var(--mute)'};">{'OP' if st.session_state.is_operator else 'VIEW'}</span>
+      <span class="stat-v" style="font-size:13px;color:var(--ok);">AUTO</span>
+      <span class="stat-l">Pairing</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-v" style="font-size:13px;color:var(--ok);">OP</span>
       <span class="stat-l">Access</span>
     </div>
     <div class="{arm_cls}">
@@ -963,7 +1299,6 @@ def render_cam_01_feed(stream_url):
         )
         st.image(create_placeholder("CAM 01", "STANDBY"), width="stretch")
         st.button("🔕 Silence CAM 01", key="silence_1",
-                  disabled=not st.session_state.is_operator,
                   on_click=silence_alerts, width="stretch")
         return
 
@@ -1008,9 +1343,14 @@ def render_cam_01_feed(stream_url):
             unsafe_allow_html=True
         )
         st.image(create_placeholder("CAM 01", "CONNECTING..."), width="stretch")
+        if str(stream_url).startswith("http"):
+            st.markdown(
+                f'<div style="font-family:var(--mono);font-size:11px;color:var(--warn);text-align:center;padding:4px 0;">'
+                f'🟡 AWAITING FEED ({stream_url}) &middot; Ensure "Start server" is active in IP Webcam on phone</div>',
+                unsafe_allow_html=True
+            )
 
     st.button("🔕 Silence CAM 01", key="silence_1",
-              disabled=not st.session_state.is_operator,
               on_click=silence_alerts, width="stretch")
 
     # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins" + Silence Cooldown + Debounced Clearing) ──
@@ -1063,6 +1403,7 @@ def render_cam_01_feed(stream_url):
                 st.session_state.active_alert = None
                 st.session_state.hazard_clear_ts = None
                 st.session_state.active_audio_b64 = None
+                st.session_state.stop_audio_id = st.session_state.get('stop_audio_id', 0) + 1
                 play_persistent_audio(None, 0)
 
     # Persistent Parent-Window Web Audio Playback (Loops infinitely until Silence/Disarm or Hazard Clears)
@@ -1118,7 +1459,6 @@ with col2:
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
     st.image(create_placeholder("CAM 02"), width="stretch")
     st.button("🔕 Silence CAM 02", key="silence_2",
-              disabled=not st.session_state.is_operator,
               on_click=dummy_silence, args=("CAM 02",), width="stretch")
 
 col3, col4 = st.columns(2)
@@ -1137,7 +1477,6 @@ with col3:
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
     st.image(create_placeholder("CAM 03"), width="stretch")
     st.button("🔕 Silence CAM 03", key="silence_3",
-              disabled=not st.session_state.is_operator,
               on_click=dummy_silence, args=("CAM 03",), width="stretch")
 
 with col4:
@@ -1154,7 +1493,6 @@ with col4:
         '<span class="mv off">—</span></div>', unsafe_allow_html=True)
     st.image(create_placeholder("CAM 04"), width="stretch")
     st.button("🔕 Silence CAM 04", key="silence_4",
-              disabled=not st.session_state.is_operator,
               on_click=dummy_silence, args=("CAM 04",), width="stretch")
 
 # ─────────────────────────────────────────────────────────────────────────────

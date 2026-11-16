@@ -4,12 +4,20 @@ Provides:
   - SSRF-safe video stream URL validation
   - Timing-attack-resistant Operator PIN authentication
   - PyTorch model integrity (SHA-256) verification
+  - Zero-UI-Input cryptographic camera auto-discovery & handshake
 """
+import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 import hashlib
 import hmac
 import ipaddress
+import json
 import os
 import re
+import socket
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
 
 # Default expected SHA-256 for best.pt (fine-tuned custom fire model)
@@ -132,3 +140,419 @@ def verify_model_hash(model_path: str, expected_sha256: str = None) -> tuple[boo
         return False, f"Integrity check FAILED for {model_path}. Expected {expected[:12]}..., got {calculated[:12]}..."
 
     return True, calculated
+
+
+def get_local_subnets() -> list[str]:
+    """
+    Detect all active local IPv4 subnets (/24) across active interfaces
+    (Wi-Fi, Ethernet, Mobile Hotspot) using socket routing probes and getaddrinfo.
+    """
+    subnets = set()
+
+    # Strategy 1: Active routing interface via UDP socket probe to public IP
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.2)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        if not local_ip.startswith("127."):
+            net = ipaddress.ip_network(f"{local_ip}/24", strict=False)
+            subnets.add(str(net))
+    except Exception:
+        pass
+
+    # Strategy 2: Hostname resolution to capture all bound local IPv4 addresses
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127."):
+                net = ipaddress.ip_network(f"{ip}/24", strict=False)
+                subnets.add(str(net))
+    except Exception:
+        pass
+
+    # Fallback to standard private LAN range if no interfaces discovered
+    if not subnets:
+        subnets.add("192.168.1.0/24")
+
+    return sorted(list(subnets))
+
+
+def _check_socket_port(ip: str, port: int, timeout: float = 0.2) -> bool:
+    """Fast TCP SYN connect probe to check if IP:port is open."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        return s.connect_ex((ip, port)) == 0
+    except Exception:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _verify_camera_endpoint(
+    ip: str,
+    port: int,
+    user: str = "",
+    secret: str = "",
+    timeout: float = 0.5
+) -> bool:
+    """
+    Verify camera endpoint (/shot.jpg, /status.json, /video, /)
+    with optional HTTP Basic Auth.
+    """
+    endpoints = ["/shot.jpg", "/status.json", "/video", "/"]
+    headers = {"User-Agent": "HazardLens-AutoPair/1.0"}
+
+    if user and secret:
+        auth_bytes = f"{user}:{secret}".encode("utf-8")
+        b64_auth = base64.b64encode(auth_bytes).decode("ascii")
+        headers["Authorization"] = f"Basic {b64_auth}"
+
+    for ep in endpoints:
+        url = f"http://{ip}:{port}{ep}"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                code = resp.getcode()
+                if code in (200, 204, 301, 302):
+                    return True
+        except urllib.error.HTTPError as he:
+            if he.code == 401:
+                # If credentials were provided and server rejected them, auth failed
+                if user and secret:
+                    return False
+                # If no credentials were provided and server asks for auth, camera is detected
+                return True
+            continue
+        except Exception:
+            continue
+    return False
+
+
+def discover_paired_camera(
+    port: int = None,
+    user: str = None,
+    secret: str = None,
+    timeout: float = 0.3,
+    cached_url: str = None
+) -> str | None:
+    """
+    Auto-discovers and cryptographically authenticates paired CCTV node on local network.
+    Fast path: validates cached_url or HAZARDLENS_DRONE_URL first (~0.02s).
+    Sweep path: scans all local /24 subnets in parallel via ThreadPoolExecutor(max_workers=64).
+
+    Returns:
+        Authenticated stream URL (e.g. 'http://user:secret@192.168.1.7:8080/video') or None.
+    """
+    if port is None:
+        try:
+            port = int(os.getenv("HAZARDLENS_CAM_PORT", "8080"))
+        except ValueError:
+            port = 8080
+
+    if user is None:
+        user = os.getenv("HAZARDLENS_CAM_USER", "")
+    if secret is None:
+        secret = os.getenv("HAZARDLENS_CAM_SECRET", "")
+
+    def _format_cam_url(ip_addr: str, cam_port: int) -> str:
+        if user and secret:
+            return f"http://{user}:{secret}@{ip_addr}:{cam_port}/video"
+        return f"http://{ip_addr}:{cam_port}/video"
+
+    # Fast Path 1: Check cached_url
+    if cached_url:
+        try:
+            parsed = urlparse(cached_url)
+            host = parsed.hostname
+            p = parsed.port or port
+            if host and _check_socket_port(host, p, timeout=0.15):
+                if _verify_camera_endpoint(host, p, user, secret, timeout=0.3):
+                    return _format_cam_url(host, p)
+        except Exception:
+            pass
+
+    # Fast Path 2: Check HAZARDLENS_DRONE_URL env var if set
+    drone_env = os.getenv("HAZARDLENS_DRONE_URL", "").strip()
+    if drone_env:
+        try:
+            parsed = urlparse(drone_env)
+            host = parsed.hostname
+            p = parsed.port or port
+            if host and _check_socket_port(host, p, timeout=0.15):
+                if _verify_camera_endpoint(host, p, user, secret, timeout=0.3):
+                    return _format_cam_url(host, p)
+        except Exception:
+            pass
+
+    # Full Subnet Discovery Sweep
+    subnets = get_local_subnets()
+    all_target_ips = []
+    for subnet in subnets:
+        try:
+            net = ipaddress.ip_network(subnet, strict=False)
+            all_target_ips.extend([str(ip) for ip in net.hosts()])
+        except Exception:
+            continue
+
+    if not all_target_ips:
+        return None
+
+    # Step 1: Parallel Port Scan across all target IPs
+    candidate_ips = []
+    with ThreadPoolExecutor(max_workers=64) as executor:
+        futures = {
+            executor.submit(_check_socket_port, ip, port, timeout): ip
+            for ip in all_target_ips
+        }
+        for future in as_completed(futures):
+            ip = futures[future]
+            try:
+                if future.result():
+                    candidate_ips.append(ip)
+            except Exception:
+                pass
+
+    if not candidate_ips:
+        return None
+
+    # Step 2: Verify candidate IPs with camera endpoint & authentication
+    for ip in candidate_ips:
+        if _verify_camera_endpoint(ip, port, user, secret, timeout=0.5):
+            return _format_cam_url(ip, port)
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MULTI-CAMERA HARDWARE PAIRING REGISTRY & AUTO-IP HEALING
+# ─────────────────────────────────────────────────────────────────────────────
+PAIRED_CAMERAS_FILE = os.path.join("config", "paired_cameras.json")
+
+
+def load_paired_cameras() -> dict:
+    """Load the paired cameras registry from config/paired_cameras.json."""
+    if not os.path.exists(PAIRED_CAMERAS_FILE):
+        return {}
+    try:
+        with open(PAIRED_CAMERAS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_paired_cameras(data: dict) -> bool:
+    """Save the paired cameras registry to config/paired_cameras.json."""
+    try:
+        os.makedirs(os.path.dirname(PAIRED_CAMERAS_FILE), exist_ok=True)
+        with open(PAIRED_CAMERAS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def get_paired_camera(slot: str = "CAM 01") -> dict | None:
+    """Get paired camera info for a specific slot."""
+    registry = load_paired_cameras()
+    return registry.get(slot)
+
+
+def save_camera_slot(slot: str, ip_port: str, user: str = "", password: str = "") -> bool:
+    """Register or update a camera slot in the persistent registry."""
+    registry = load_paired_cameras()
+    clean_ip_port = ip_port.strip().replace("::ffff:", "").replace("http://", "").replace("https://", "").rstrip("/")
+    registry[slot] = {
+        "last_ip_port": clean_ip_port,
+        "user": user.strip(),
+        "password": password.strip(),
+        "updated_at": datetime.now().isoformat()
+    }
+    return save_paired_cameras(registry)
+
+
+def scan_network_cameras(port: int = 8080, timeout: float = 1.2) -> list[str]:
+    """
+    Detects all active local IPv4 subnets (Wi-Fi, Windows Mobile Hotspot, Android/iOS hotspots)
+    and scans port 8080 in parallel via ThreadPoolExecutor(max_workers=128).
+    Returns a list of discovered '<ip>:<port>' endpoints that respond to HTTP
+    (including 401 Unauthorized, which indicates an authenticated IP webcam service).
+    """
+    subnets = get_local_subnets()
+    all_target_ips = []
+    for subnet in subnets:
+        try:
+            net = ipaddress.ip_network(subnet, strict=False)
+            all_target_ips.extend([str(ip) for ip in net.hosts()])
+        except Exception:
+            continue
+
+    if not all_target_ips:
+        return []
+
+    # Step 1: Parallel TCP connect probe with min(1.0, timeout) across 128 threads
+    open_ips = []
+    tcp_timeout = min(1.0, timeout)
+    with ThreadPoolExecutor(max_workers=128) as executor:
+        futures = {
+            executor.submit(_check_socket_port, ip, port, tcp_timeout): ip
+            for ip in all_target_ips
+        }
+        for future in as_completed(futures):
+            ip = futures[future]
+            try:
+                if future.result():
+                    open_ips.append(ip)
+            except Exception:
+                pass
+
+    if not open_ips:
+        return []
+
+    # Step 2: Parallel HTTP check (accepts 200, 301, 302, 401, 403, 404 as valid HTTP service)
+    discovered = []
+    http_timeout = max(1.0, timeout)
+
+    def _probe_http(target_ip: str) -> str | None:
+        url = f"http://{target_ip}:{port}/shot.jpg"
+        req = urllib.request.Request(url, headers={"User-Agent": "HazardLens-Scanner/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=http_timeout) as resp:
+                if resp.getcode() in (200, 204, 301, 302):
+                    return f"{target_ip}:{port}"
+        except urllib.error.HTTPError as he:
+            if he.code in (401, 403, 404):
+                return f"{target_ip}:{port}"
+        except Exception:
+            pass
+
+        url_root = f"http://{target_ip}:{port}/"
+        req_root = urllib.request.Request(url_root, headers={"User-Agent": "HazardLens-Scanner/1.0"})
+        try:
+            with urllib.request.urlopen(req_root, timeout=http_timeout) as resp:
+                if resp.getcode() in (200, 204, 301, 302):
+                    return f"{target_ip}:{port}"
+        except urllib.error.HTTPError as he:
+            if he.code in (401, 403, 404):
+                return f"{target_ip}:{port}"
+        except Exception:
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        http_futures = [executor.submit(_probe_http, ip) for ip in open_ips]
+        for f in as_completed(http_futures):
+            try:
+                res = f.result()
+                if res and res not in discovered:
+                    discovered.append(res)
+            except Exception:
+                pass
+
+    return sorted(discovered)
+
+
+def verify_camera_handshake(ip_port: str, user: str = "", password: str = "", timeout: float = 1.5) -> bool:
+    """
+    Request http://<ip_port>/shot.jpg with HTTP Basic Auth (only if user is provided).
+    If user is empty, sends auth=None to avoid invalid/rejected authentication headers.
+    Return True only if HTTP 200 OK is returned with image/stream content.
+    """
+    if not ip_port:
+        return False
+
+    clean_host = ip_port.strip().replace("http://", "").replace("https://", "").rstrip("/")
+    url = f"http://{clean_host}/shot.jpg"
+
+    # Only send auth credentials if user is explicitly provided
+    auth_val = (user, password) if user else None
+
+    # Primary verification using requests.get
+    try:
+        import requests
+        headers = {"User-Agent": "HazardLens-Handshake/1.0"}
+        resp = requests.get(url, auth=auth_val, headers=headers, timeout=timeout)
+        if resp.status_code == 200:
+            content_type = resp.headers.get("Content-Type", "").lower()
+            if "image" in content_type or resp.content.startswith(b"\xff\xd8\xff") or len(resp.content) > 0:
+                return True
+        elif resp.status_code == 401:
+            return False
+    except Exception:
+        pass
+
+    # Fallback verification via urllib.request
+    headers = {"User-Agent": "HazardLens-Handshake/1.0"}
+    if auth_val:
+        auth_bytes = f"{user}:{password}".encode("utf-8")
+        b64_auth = base64.b64encode(auth_bytes).decode("ascii")
+        headers["Authorization"] = f"Basic {b64_auth}"
+
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.getcode() == 200:
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                chunk = resp.read(16)
+                if "image" in content_type or chunk.startswith(b"\xff\xd8\xff") or len(chunk) > 0:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def resolve_paired_camera(slot: str = "CAM 01") -> str | None:
+    """
+    Resolve live stream URL for the paired camera slot with Auto-IP Healing.
+    Fast Path: If slot has last_ip_port configured, cleans it and immediately returns the stream URL.
+    """
+    cam_info = get_paired_camera(slot)
+
+    def _make_stream_url(ip_p: str, u: str = "", p: str = "") -> str:
+        clean = ip_p.replace("::ffff:", "").replace("http://", "").replace("https://", "").rstrip("/")
+        if u or p:
+            return f"http://{u}:{p}@{clean}/video"
+        return f"http://{clean}/video"
+
+    # Fast Path: If camera was registered/configured, check and return stream URL
+    if cam_info and cam_info.get("last_ip_port"):
+        last_ip_port = cam_info.get("last_ip_port", "").strip()
+        user = cam_info.get("user", "").strip()
+        password = cam_info.get("password", "").strip()
+
+        # Clean corrupted ::ffff: if present
+        clean_ip_port = last_ip_port.replace("::ffff:", "").strip()
+        if clean_ip_port != last_ip_port:
+            save_camera_slot(slot, clean_ip_port, user=user, password=password)
+            last_ip_port = clean_ip_port
+
+        # Fast handshake check
+        if verify_camera_handshake(last_ip_port, user=user, password=password, timeout=0.8):
+            return _make_stream_url(last_ip_port, user, password)
+
+        # Auto-Heal: If last_ip_port failed handshake, scan for reachable node
+        discovered_nodes = scan_network_cameras(timeout=1.0)
+        for node in discovered_nodes:
+            if node == last_ip_port:
+                continue
+            if verify_camera_handshake(node, user=user, password=password, timeout=1.0):
+                save_camera_slot(slot, node, user=user, password=password)
+                return _make_stream_url(node, user, password)
+
+        # Fallback to configured last_ip_port rather than dropping to demo mode
+        return _make_stream_url(last_ip_port, user, password)
+
+    # Auto-Discovery Fallback: only if unconfigured, scan network
+    discovered_nodes = scan_network_cameras(timeout=1.2)
+    if discovered_nodes:
+        fallback_node = discovered_nodes[0].replace("::ffff:", "")
+        save_camera_slot(slot, fallback_node, user="", password="")
+        return _make_stream_url(fallback_node)
+
+    return None

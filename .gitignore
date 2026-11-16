@@ -12,3 +12,6 @@ old_best.pt
 
 # Ignore Generated Audio Alerts
 *.mp3
+
+# Ignore Local Hardware Camera Registry (contains private camera IPs & credentials)
+config/paired_cameras.json

@@ -80,10 +80,41 @@ def test_play_persistent_audio_generates_script():
 
 def test_stop_persistent_audio_generates_stop_script():
     with patch("streamlit.components.v1.html") as mock_html:
-        play_persistent_audio(None, 0)
+        play_persistent_audio(None, 0, force=True)
         mock_html.assert_called_once()
         args, kwargs = mock_html.call_args
         assert "w._hzAudio.pause()" in args[0]
         assert "clearTimeout(w._hzLoopTimer)" in args[0]
         assert kwargs["height"] == 0
         assert kwargs["width"] == 0
+
+def test_play_persistent_audio_skips_when_state_unchanged():
+    with patch("streamlit.components.v1.html") as mock_html:
+        st.session_state._last_rendered_audio_state = None
+        st.session_state.stop_audio_id = 99
+        # First call triggers render
+        play_persistent_audio(None, 0)
+        assert mock_html.call_count == 1
+
+        # Second call with unchanged state MUST NOT call mock_html again!
+        play_persistent_audio(None, 0)
+        assert mock_html.call_count == 1
+
+def test_play_persistent_audio_renders_on_state_transition():
+    with patch("streamlit.components.v1.html") as mock_html:
+        st.session_state._last_rendered_audio_state = None
+        st.session_state.stop_audio_id = 1
+        st.session_state.audio_trigger_id = 1
+
+        # State 1: Stop
+        play_persistent_audio(None, 0)
+        assert mock_html.call_count == 1
+
+        # State 2: Transition to Play
+        st.session_state.audio_trigger_id = 2
+        play_persistent_audio("sample_b64", 2)
+        assert mock_html.call_count == 2
+
+        # State 3: Identical tick (must skip)
+        play_persistent_audio("sample_b64", 2)
+        assert mock_html.call_count == 2
