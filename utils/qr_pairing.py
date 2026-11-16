@@ -15,7 +15,14 @@ import threading
 import time
 from urllib.parse import parse_qs, urlparse
 
-from utils.security import save_camera_slot, get_paired_camera
+from utils.security import (
+    save_camera_slot,
+    get_paired_camera,
+    clean_ip_address,
+    get_all_local_ips,
+    verify_camera_handshake,
+    discover_cameras_on_lan,
+)
 
 ACTIVE_PAIRING_TOKENS = {}
 _PAIRING_LOCK = threading.Lock()
@@ -67,8 +74,6 @@ class PairingHTTPHandler(http.server.BaseHTTPRequestHandler):
             elif slot.startswith("CAM") and len(slot) == 5:
                 slot = f"{slot[:3]} {slot[3:]}"
 
-            phone_ip = self.client_address[0]
-
             with _PAIRING_LOCK:
                 session = ACTIVE_PAIRING_TOKENS.get(token)
 
@@ -83,10 +88,55 @@ class PairingHTTPHandler(http.server.BaseHTTPRequestHandler):
                 return
 
             target_slot = session.get("slot", slot) if session else slot
-            ip_port = f"{phone_ip}:8080"
+
+            candidate_raw = self.client_address[0]
+            candidate_ip = clean_ip_address(candidate_raw)
+            local_ips = get_all_local_ips()
+            camera_endpoint = None
+
+            # 1. If candidate_ip is real remote IP (not laptop/loopback) and port 8080 responds:
+            if candidate_ip and candidate_ip not in local_ips and not candidate_ip.startswith("127."):
+                test_node = f"{candidate_ip}:8080"
+                if verify_camera_handshake(test_node, timeout=0.8):
+                    camera_endpoint = test_node
+
+            # 2. Fallback to existing paired camera if active
+            if not camera_endpoint:
+                existing_info = get_paired_camera(target_slot)
+                if existing_info and existing_info.get("last_ip_port"):
+                    full_existing = existing_info["last_ip_port"].replace("::ffff:", "").strip()
+                    existing_ip = clean_ip_address(full_existing)
+                    if existing_ip and existing_ip not in local_ips and not existing_ip.startswith("127."):
+                        if verify_camera_handshake(full_existing, user=existing_info.get("user", ""), password=existing_info.get("password", ""), timeout=0.8):
+                            camera_endpoint = full_existing
+
+            # 3. Fallback to LAN discovery
+            if not camera_endpoint:
+                discovered = discover_cameras_on_lan(port=8080, timeout=1.0)
+                for node in discovered:
+                    if verify_camera_handshake(node, timeout=0.8):
+                        camera_endpoint = node
+                        break
+
+            if not camera_endpoint:
+                camera_endpoint = f"{candidate_ip}:8080" if (candidate_ip and candidate_ip not in local_ips) else None
+
+            if not camera_endpoint:
+                err_body = b"<h3>HazardLens: No active IP Webcam camera detected on port 8080. Start server in IP Webcam app.</h3>"
+                self.send_response(404)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(err_body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(err_body)
+                return
+
+            clean_endpoint = camera_endpoint.replace("::ffff:", "").strip()
+            ip_port = clean_endpoint
+            phone_ip = clean_ip_address(clean_endpoint) or clean_endpoint.split(":")[0]
 
             # Register camera in config/paired_cameras.json
-            save_camera_slot(target_slot, ip_port, user="", password="")
+            save_camera_slot(target_slot, clean_endpoint, user="", password="")
 
             with _PAIRING_LOCK:
                 if session:
@@ -191,7 +241,7 @@ def generate_qr_code_png(url: str) -> bytes:
     qr.make(fit=True)
     img = qr.make_image(fill_color="#000000", back_color="#FFFFFF")
     buf = BytesIO()
-    img.save(buf, format="PNG")
+    img.save(buf)
     return buf.getvalue()
 
 

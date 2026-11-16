@@ -142,6 +142,82 @@ def verify_model_hash(model_path: str, expected_sha256: str = None) -> tuple[boo
     return True, calculated
 
 
+def clean_ip_address(ip_str: str | None) -> str | None:
+    """
+    Sanitize and extract clean IPv4/IPv6 address:
+    - Strips 'http://', 'https://', trailing slashes.
+    - Strips brackets from IPv6 (e.g. '[::ffff:192.168.1.14]:8080').
+    - Strips '::ffff:' IPv4-mapped IPv6 prefix.
+    - Strips ports if present (e.g. '192.168.1.14:8080' -> '192.168.1.14').
+    """
+    if not ip_str:
+        return None
+    cleaned = str(ip_str).strip()
+    cleaned = cleaned.replace("http://", "").replace("https://", "").rstrip("/")
+
+    # Handle bracketed host with optional port: [host]:port or [host]
+    if cleaned.startswith("[") and "]" in cleaned:
+        bracket_end = cleaned.find("]")
+        cleaned = cleaned[1:bracket_end]
+    else:
+        cleaned = cleaned.replace("[", "").replace("]", "")
+
+    # Strip ::ffff: prefix if present
+    if cleaned.startswith("::ffff:"):
+        cleaned = cleaned[7:].strip()
+    elif "::ffff:" in cleaned:
+        cleaned = cleaned.split("::ffff:")[-1].strip()
+
+    # If it has a port (IPv4:port)
+    if ":" in cleaned and not cleaned.startswith("::"):
+        cleaned = cleaned.split(":")[0].strip()
+
+    return cleaned if cleaned else None
+
+
+def get_local_ip() -> str:
+    """Detect the active Wi-Fi / LAN IP of the laptop."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.2)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127."):
+                return ip
+    except Exception:
+        pass
+
+    return "127.0.0.1"
+
+
+def get_all_local_ips() -> set[str]:
+    """Return all known local / loopback IPs belonging to the laptop itself."""
+    local_ips = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+    local_ip = get_local_ip()
+    if local_ip:
+        local_ips.add(local_ip)
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None):
+            raw = info[4][0]
+            clean = clean_ip_address(raw)
+            if clean:
+                local_ips.add(clean)
+    except Exception:
+        pass
+    return local_ips
+
+
 def get_local_subnets() -> list[str]:
     """
     Detect all active local IPv4 subnets (/24) across active interfaces
@@ -180,12 +256,13 @@ def get_local_subnets() -> list[str]:
     return sorted(list(subnets))
 
 
-def _check_socket_port(ip: str, port: int, timeout: float = 0.2) -> bool:
-    """Fast TCP SYN connect probe to check if IP:port is open."""
+def _check_socket_port(ip: str, port: int, timeout: float = 0.5) -> bool:
+    """Fast TCP connect probe to check if IP:port is open."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
-        return s.connect_ex((ip, port)) == 0
+        s.connect((ip, port))
+        return True
     except Exception:
         return False
     finally:
@@ -365,9 +442,20 @@ def get_paired_camera(slot: str = "CAM 01") -> dict | None:
 
 
 def save_camera_slot(slot: str, ip_port: str, user: str = "", password: str = "") -> bool:
-    """Register or update a camera slot in the persistent registry."""
+    """
+    Register or update a camera slot in the persistent registry.
+    Strictly prevents saving the operator's laptop IP or loopback address.
+    """
     registry = load_paired_cameras()
     clean_ip_port = ip_port.strip().replace("::ffff:", "").replace("http://", "").replace("https://", "").rstrip("/")
+    raw_ip = clean_ip_port.split(":")[0] if ":" in clean_ip_port else clean_ip_port
+    raw_ip_cleaned = clean_ip_address(raw_ip)
+
+    # Safety Guard: Never register the operator's laptop or loopback as a camera feed!
+    local_ips = get_all_local_ips()
+    if raw_ip_cleaned in local_ips or (raw_ip_cleaned and raw_ip_cleaned.startswith("127.")):
+        return False
+
     registry[slot] = {
         "last_ip_port": clean_ip_port,
         "user": user.strip(),
@@ -456,6 +544,21 @@ def scan_network_cameras(port: int = 8080, timeout: float = 1.2) -> list[str]:
                 pass
 
     return sorted(discovered)
+
+
+def discover_cameras_on_lan(port: int = 8080, timeout: float = 1.0) -> list[str]:
+    """
+    Scans local network for active IP Webcam nodes on port 8080.
+    Strictly filters out any local / loopback IPs belonging to the laptop itself.
+    """
+    nodes = scan_network_cameras(port=port, timeout=timeout)
+    local_ips = get_all_local_ips()
+    filtered = []
+    for node in nodes:
+        node_ip = clean_ip_address(node)
+        if node_ip and node_ip not in local_ips and not node_ip.startswith("127."):
+            filtered.append(node)
+    return filtered
 
 
 def verify_camera_handshake(ip_port: str, user: str = "", password: str = "", timeout: float = 1.5) -> bool:

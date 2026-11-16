@@ -391,3 +391,39 @@ class TestQRPairing:
         status_after = get_pairing_status(token)
         assert status_after["paired"] is True
         assert status_after["phone_ip"] == "192.168.1.3"
+
+    def test_clean_ip_address_strips_ipv6_mapped_and_ports(self):
+        from utils.security import clean_ip_address
+        assert clean_ip_address("::ffff:192.168.1.14") == "192.168.1.14"
+        assert clean_ip_address("::ffff:192.168.1.3:8080") == "192.168.1.3"
+        assert clean_ip_address("http://192.168.1.3:8080/") == "192.168.1.3"
+        assert clean_ip_address("[::ffff:192.168.1.14]:8501") == "192.168.1.14"
+        assert clean_ip_address("127.0.0.1") == "127.0.0.1"
+        assert clean_ip_address(None) is None
+        assert clean_ip_address("") is None
+
+    def test_save_camera_slot_rejects_laptop_own_ip_and_loopback(self, tmp_path, monkeypatch):
+        from utils.security import save_camera_slot, get_paired_camera
+        test_file = str(tmp_path / "test_reg.json")
+        monkeypatch.setattr("utils.security.PAIRED_CAMERAS_FILE", test_file)
+        monkeypatch.setattr("utils.security.get_local_ip", lambda: "192.168.1.14")
+
+        # Saving laptop IP or loopback MUST return False and not save
+        assert save_camera_slot("CAM 01", "192.168.1.14:8080") is False
+        assert save_camera_slot("CAM 01", "::ffff:192.168.1.14:8080") is False
+        assert save_camera_slot("CAM 01", "127.0.0.1:8080") is False
+        assert save_camera_slot("CAM 01", "localhost:8080") is False
+
+        # Saving genuine camera IP MUST succeed
+        assert save_camera_slot("CAM 01", "192.168.1.3:8080") is True
+        cam = get_paired_camera("CAM 01")
+        assert cam["last_ip_port"] == "192.168.1.3:8080"
+
+    def test_discover_cameras_on_lan_filters_local_ips(self, monkeypatch):
+        from utils.security import discover_cameras_on_lan
+        monkeypatch.setattr("utils.security.get_local_ip", lambda: "192.168.1.14")
+        mock_scan = ["192.168.1.14:8080", "127.0.0.1:8080", "192.168.1.3:8080", "::ffff:192.168.1.14:8080"]
+        monkeypatch.setattr("utils.security.scan_network_cameras", lambda port, timeout: mock_scan)
+
+        discovered = discover_cameras_on_lan(port=8080)
+        assert discovered == ["192.168.1.3:8080"]

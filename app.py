@@ -23,11 +23,15 @@ from utils.security import (
     verify_model_hash,
     discover_paired_camera,
     scan_network_cameras,
+    discover_cameras_on_lan,
     verify_camera_handshake,
     resolve_paired_camera,
     load_paired_cameras,
     save_camera_slot,
     get_paired_camera,
+    clean_ip_address,
+    get_local_ip,
+    get_all_local_ips,
     DEFAULT_BEST_PT_SHA256,
 )
 from utils.qr_pairing import (
@@ -109,25 +113,23 @@ if "pair_token" in st.query_params or "token" in st.query_params:
         """, unsafe_allow_html=True)
         st.stop()
 
-    # 3-Layer IP Resolution Fallback:
-    phone_ip = None
+    # ── 3-Layer IP Extraction & Verification ──
+    candidate_raw = None
 
     # Layer 1: Query parameter 'phone_ip'
     if "phone_ip" in st.query_params and st.query_params.get("phone_ip"):
-        candidate = st.query_params.get("phone_ip").strip()
-        if candidate and not candidate.startswith("127.") and candidate != "localhost":
-            phone_ip = candidate
+        candidate_raw = st.query_params.get("phone_ip")
 
     # Layer 2: Tornado / Streamlit client IP & proxy headers
-    if not phone_ip:
+    if not candidate_raw:
         try:
             client_ip = getattr(st.context, "ip_address", None)
-            if client_ip and client_ip != "127.0.0.1" and not client_ip.startswith("127."):
-                phone_ip = client_ip
+            if client_ip:
+                candidate_raw = client_ip
         except Exception:
             pass
 
-    if not phone_ip:
+    if not candidate_raw:
         try:
             headers = getattr(st.context, "headers", None)
             if headers:
@@ -135,58 +137,74 @@ if "pair_token" in st.query_params or "token" in st.query_params:
                     val = headers.get(hdr)
                     if val:
                         first = val.split(",")[0].strip()
-                        if first and not first.startswith("127.") and first != "localhost":
-                            phone_ip = first
+                        if first:
+                            candidate_raw = first
                             break
         except Exception:
             pass
 
-    # Optional Tornado websocket headers fallback
-    if not phone_ip:
+    # Optional Tornado websocket headers fallback (dynamic import to prevent Pylance errors)
+    if not candidate_raw:
         try:
-            from streamlit.web.server.websocket_headers import _get_websocket_headers
-            ws_headers = _get_websocket_headers()
-            if ws_headers:
-                for hdr in ("x-forwarded-for", "x-real-ip", "remote-addr"):
-                    val = ws_headers.get(hdr)
-                    if val:
-                        first = val.split(",")[0].strip()
-                        if first and not first.startswith("127.") and first != "localhost":
-                            phone_ip = first
-                            break
+            import importlib
+            ws_mod = importlib.import_module("streamlit.web.server.websocket_headers")
+            get_ws_hdr = getattr(ws_mod, "_get_websocket_headers", None)
+            if callable(get_ws_hdr):
+                ws_headers = get_ws_hdr()
+                if ws_headers:
+                    for hdr in ("x-forwarded-for", "x-real-ip", "remote-addr"):
+                        val = ws_headers.get(hdr)
+                        if val:
+                            first = val.split(",")[0].strip()
+                            if first:
+                                candidate_raw = first
+                                break
         except Exception:
             pass
 
-    # Filter out laptop's own IP and loopback so laptop is never registered as a camera!
-    from utils.qr_pairing import get_laptop_wifi_ip
-    laptop_ip = get_laptop_wifi_ip()
-    if phone_ip:
-        clean_ip = phone_ip.replace("::ffff:", "").strip()
-        if clean_ip in (laptop_ip, "127.0.0.1", "localhost", "::1") or clean_ip.startswith("127."):
-            phone_ip = None
-
-    # Layer 3: Network camera scanner (finds active IP Webcam nodes on Wi-Fi)
-    discovered_nodes = scan_network_cameras(port=8080, timeout=1.2)
-    # Never consider the laptop itself as a camera node
-    discovered_nodes = [d for d in discovered_nodes if not d.startswith(f"{laptop_ip}:") and not d.startswith("127.") and "::ffff:" not in d]
+    # Clean candidate IP: strip ::ffff: prefix, brackets, and ports
+    candidate_ip = clean_ip_address(candidate_raw)
+    local_ips = get_all_local_ips()
     camera_endpoint = None
 
-    if phone_ip:
-        # Check if phone_ip is among discovered nodes on port 8080
-        matching = [d for d in discovered_nodes if d.startswith(f"{phone_ip}:")]
-        if matching:
-            camera_endpoint = matching[0]
-        else:
-            camera_endpoint = f"{phone_ip}:8080"
-    else:
-        # If headers/socket didn't expose phone IP, pick first active IP Webcam node
-        if discovered_nodes:
-            camera_endpoint = discovered_nodes[0]
-            phone_ip = camera_endpoint.split(":")[0]
+    # Step 1: If candidate_ip is a real remote IP (NOT laptop itself or loopback)
+    # AND responds on port 8080:
+    if candidate_ip and candidate_ip not in local_ips and not candidate_ip.startswith("127."):
+        test_node = f"{candidate_ip}:8080"
+        if verify_camera_handshake(test_node, timeout=0.8):
+            camera_endpoint = test_node
+
+    # Step 2: If candidate_ip is loopback, laptop itself, or failed port 8080 check:
+    # Check if existing paired camera slot is already a valid phone camera on LAN (e.g. 192.168.1.3:8080)
+    if not camera_endpoint:
+        existing_info = get_paired_camera(target_slot)
+        if existing_info and existing_info.get("last_ip_port"):
+            existing_node = existing_info["last_ip_port"].replace("::ffff:", "").strip()
+            existing_ip = clean_ip_address(existing_node)
+            if existing_ip and existing_ip not in local_ips and not existing_ip.startswith("127."):
+                if verify_camera_handshake(existing_node, user=existing_info.get("user", ""), password=existing_info.get("password", ""), timeout=0.8):
+                    camera_endpoint = existing_node
+
+    # Step 3: If still not resolved, scan the LAN for active IP Webcam nodes on port 8080
+    if not camera_endpoint:
+        discovered = discover_cameras_on_lan(port=8080, timeout=1.0)
+        for node in discovered:
+            if verify_camera_handshake(node, timeout=0.8):
+                camera_endpoint = node
+                break
 
     if camera_endpoint:
-        save_camera_slot(target_slot, camera_endpoint, user="", password="")
-        mark_pairing_complete(pair_token, phone_ip or camera_endpoint.split(":")[0], slot=target_slot)
+        clean_endpoint = camera_endpoint.replace("::ffff:", "").strip()
+        verified_ip = clean_ip_address(clean_endpoint) or clean_endpoint.split(":")[0]
+
+        # Save verified camera IP to config/paired_cameras.json
+        save_camera_slot(target_slot, clean_endpoint, user="", password="")
+        mark_pairing_complete(pair_token, verified_ip, slot=target_slot)
+
+        # Auto-arm the system so live video starts immediately!
+        st.session_state.system_armed = True
+        st.session_state.paired_camera_url = f"http://{clean_endpoint}/video"
+
         st.markdown(f"""
         <div style="background:#111820; border:1px solid #1F2B38; border-radius:12px; padding:32px 24px; text-align:center; max-width:420px; margin:40px auto; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#E6EDF3; box-shadow:0 8px 32px rgba(0,0,0,0.6);">
           <div style="display:inline-block; background:rgba(61,214,140,0.15); color:#3DD68C; border:1px solid #3DD68C; border-radius:20px; padding:6px 16px; font-size:13px; font-weight:700; margin-bottom:16px;">
@@ -197,7 +215,7 @@ if "pair_token" in st.query_params or "token" in st.query_params:
             Your smartphone has been authenticated &amp; linked as a live surveillance feed:
           </p>
           <div style="background:#0B0F14; border:1px solid #2D3F53; border-radius:8px; padding:14px; font-family:monospace; color:#3DD68C; font-size:18px; font-weight:700; margin-bottom:18px;">
-            {target_slot} &middot; {camera_endpoint}
+            {target_slot} &middot; {clean_endpoint}
           </div>
           <p style="color:#7B8DA0; font-size:13px; line-height:1.5; margin:0 0 16px 0;">
             Ensure <strong>IP Webcam</strong> is broadcasting on port 8080.<br>
@@ -1081,7 +1099,12 @@ with st.sidebar:
             p_status = get_pairing_status(token)
             if p_status and p_status.get("paired"):
                 st.success(f"✅ Phone linked: {p_status.get('phone_ip')}:8080")
-                if st.button("🔴 Start Live Stream", width="stretch", key="btn_refresh_after_qr"):
+                if not st.session_state.get("system_armed", False):
+                    st.session_state.show_pairing_qr = False
+                    st.session_state.pop("qr_pairing_data", None)
+                    arm_system()
+                    st.rerun()
+                elif st.button("🔴 Start Live Stream", width="stretch", key="btn_refresh_after_qr"):
                     st.session_state.show_pairing_qr = False
                     st.session_state.pop("qr_pairing_data", None)
                     arm_system()
@@ -1422,8 +1445,13 @@ def render_cam_01_feed(stream_url):
 col1, col2 = st.columns(2)
 
 with col1:
-    hdr_cls = "cam-hdr live" if armed else "cam-hdr"
-    badge1  = live_badge if armed else stdby_badge
+    worker_obj = st.session_state.get('camera_worker')
+    has_active_feed = (armed and worker_obj is not None and getattr(worker_obj, 'latest_frame', None) is not None)
+    hdr_cls = "cam-hdr live" if has_active_feed else "cam-hdr"
+    if armed:
+        badge1 = live_badge if has_active_feed else '<span class="badge-live" style="background:#F2B33D;color:#0B0F14;">CONNECTING</span>'
+    else:
+        badge1 = stdby_badge
     st.markdown(f"""
     <div class="{hdr_cls}">
       <div>
