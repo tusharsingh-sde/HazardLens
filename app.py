@@ -57,8 +57,8 @@ email_alerter = get_email_alerter()
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-FIRE_CONF_THRESHOLD   = 0.68
-CROWD_THRESHOLD       = 5
+FIRE_CONF_THRESHOLD   = 0.80
+CROWD_THRESHOLD       = 1
 FRAME_SKIP            = 4
 EMAIL_COOLDOWN_SEC    = 120
 AUDIO_COOLDOWN_SEC    = 120
@@ -582,7 +582,7 @@ def lock_operator():
     pass
 
 def dummy_silence(cam_name):
-    st.toast(f"ℹ️ {cam_name} is on STANDBY — no active alerts to silence.")
+    st.session_state.dummy_silence_cam = cam_name
 
 def silence_alerts():
     now = time.time()
@@ -594,8 +594,10 @@ def silence_alerts():
     st.session_state.audio_expire_ts  = 0.0
     st.session_state.stop_audio_id    = st.session_state.get('stop_audio_id', 0) + 1
     st.session_state.active_audio_id  += 1
-    play_persistent_audio(None, 0)
-    st.toast(f"🔕 CAM 01 alerts silenced for {SILENCE_DURATION_SEC}s.")
+    if "last_audio_ts" in st.session_state and isinstance(st.session_state.last_audio_ts, dict):
+        st.session_state.last_audio_ts["FIRE"] = 0.0
+        st.session_state.last_audio_ts["CROWD"] = 0.0
+    st.session_state.silence_toast_pending = True
 
 def disarm_system():
     st.session_state.system_armed     = False
@@ -607,7 +609,9 @@ def disarm_system():
     st.session_state.audio_expire_ts  = 0.0
     st.session_state.stop_audio_id    = st.session_state.get('stop_audio_id', 0) + 1
     st.session_state.active_audio_id  += 1
-    play_persistent_audio(None, 0)
+    if "last_audio_ts" in st.session_state and isinstance(st.session_state.last_audio_ts, dict):
+        st.session_state.last_audio_ts["FIRE"] = 0.0
+        st.session_state.last_audio_ts["CROWD"] = 0.0
     if st.session_state.get('camera_worker') is not None:
         st.session_state.camera_worker.stop()
         st.session_state.camera_worker = None
@@ -682,22 +686,13 @@ def _generate_tts_sync(text, filename):
     t.start()
     t.join(timeout=5.0)
 
-    # Fallback to local audio asset if network is unreachable or generation fails
-    if (not os.path.exists(filename) or os.path.getsize(filename) == 0) and os.path.exists("fire_alert.mp3"):
-        try:
-            import shutil
-            shutil.copyfile("fire_alert.mp3", filename)
-        except Exception as e:
-            print(f"Fallback copy error: {e}")
-
 @st.cache_resource
 def prewarm_tts_assets():
-    """Pre-generates both Hindi voice alert MP3s on startup so they exist on disk before monitoring starts."""
-    for text in (FIRE_TTS_TEXT, CROWD_TTS_TEXT):
-        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:8]
-        filename = f"alert_{text_hash}.mp3"
-        if not os.path.exists(filename) or os.path.getsize(filename) == 0:
-            _generate_tts_sync(text, filename)
+    """Ensures both Hindi voice alert MP3s exist on disk before monitoring starts."""
+    if not os.path.exists("crowd_alert.mp3") or os.path.getsize("crowd_alert.mp3") == 0:
+        _generate_tts_sync(CROWD_TTS_TEXT, "crowd_alert.mp3")
+    if not os.path.exists("fire_alert.mp3") or os.path.getsize("fire_alert.mp3") == 0:
+        _generate_tts_sync(FIRE_TTS_TEXT, "fire_alert.mp3")
     return True
 
 prewarm_tts_assets()
@@ -705,14 +700,16 @@ prewarm_tts_assets()
 def trigger_hindi_alert(text):
     """Sets active audio in session state for persistent playback across fragment reruns."""
     try:
-        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:8]
-        filename = f"alert_{text_hash}.mp3"
+        if "ओवरक्राउडिंग" in text or text == CROWD_TTS_TEXT:
+            target_file = "crowd_alert.mp3"
+        else:
+            target_file = "fire_alert.mp3"
 
-        if not os.path.exists(filename) or os.path.getsize(filename) == 0:
-            _generate_tts_sync(text, filename)
+        if not os.path.exists(target_file) or os.path.getsize(target_file) == 0:
+            _generate_tts_sync(text, target_file)
 
-        if os.path.exists(filename) and os.path.getsize(filename) > 0:
-            with open(filename, "rb") as f:
+        if os.path.exists(target_file) and os.path.getsize(target_file) > 0:
+            with open(target_file, "rb") as f:
                 audio_bytes = f.read()
             st.session_state.active_audio_b64 = base64.b64encode(audio_bytes).decode('ascii')
             st.session_state.active_audio_id += 1
@@ -781,6 +778,7 @@ def play_persistent_audio(b64_audio: str = None, audio_id: int = 0, force: bool 
                 }
                 if (w._hzAudio) {
                   try {
+                    w._hzAudio.loop = false;
                     w._hzAudio.pause();
                     w._hzAudio.currentTime = 0;
                   } catch(e) {}
@@ -809,6 +807,7 @@ def play_persistent_audio(b64_audio: str = None, audio_id: int = 0, force: bool 
               try {{ w._hzAudio.pause(); }} catch(e) {{}}
             }}
             w._hzAudio = new w.Audio("data:audio/mp3;base64,{b64_audio}");
+            w._hzAudio.loop = true;
             w._hzAudio.onended = function() {{
               if (w._hzAudio) {{
                 w._hzLoopTimer = setTimeout(function() {{
@@ -1295,6 +1294,9 @@ stdby_badge = '<span class="badge-stdby">NO SIGNAL</span>'
 
 def render_cam_01_feed(stream_url):
     """Dynamic feed, metric strip, silence button, and hazard detection for CAM 01."""
+    if st.session_state.pop("silence_toast_pending", False):
+        st.toast(f"🔕 CAM 01 alerts silenced for {SILENCE_DURATION_SEC}s.")
+
     armed = st.session_state.get("system_armed", False)
 
     now = time.time()
@@ -1425,21 +1427,16 @@ def render_cam_01_feed(stream_url):
             elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
                 st.session_state.active_alert = None
                 st.session_state.hazard_clear_ts = None
-                st.session_state.active_audio_b64 = None
-                st.session_state.stop_audio_id = st.session_state.get('stop_audio_id', 0) + 1
-                play_persistent_audio(None, 0)
 
-    # Persistent Parent-Window Web Audio Playback (Loops infinitely until Silence/Disarm or Hazard Clears)
+    # Persistent Parent-Window Web Audio Playback (Loops infinitely until Silence/Disarm)
     active_b64 = st.session_state.get('active_audio_b64')
     active_id = st.session_state.get('active_audio_id', 0)
-    has_active_hazard = (st.session_state.get('active_alert') is not None)
 
-    if armed and not is_silenced and active_b64 and has_active_hazard:
+    if armed and not is_silenced and active_b64:
         play_persistent_audio(active_b64, active_id)
     else:
-        if not has_active_hazard:
+        if not armed or is_silenced:
             st.session_state.active_audio_b64 = None
-        if not armed or is_silenced or not has_active_hazard:
             play_persistent_audio(None, 0)
 
 col1, col2 = st.columns(2)
@@ -1522,6 +1519,10 @@ with col4:
     st.image(create_placeholder("CAM 04"), width="stretch")
     st.button("🔕 Silence CAM 04", key="silence_4",
               on_click=dummy_silence, args=("CAM 04",), width="stretch")
+
+if "dummy_silence_cam" in st.session_state and st.session_state.dummy_silence_cam:
+    _dcam = st.session_state.pop("dummy_silence_cam")
+    st.toast(f"ℹ️ {_dcam} is on STANDBY — no active alerts to silence.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FOOTER STATUS BAR

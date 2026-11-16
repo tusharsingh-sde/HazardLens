@@ -118,3 +118,9 @@ def test_play_persistent_audio_renders_on_state_transition():
         # State 3: Identical tick (must skip)
         play_persistent_audio("sample_b64", 2)
         assert mock_html.call_count == 2
+
+def test_audio_script_enables_native_loop():
+    with patch("streamlit.components.v1.html") as mock_html:
+        play_persistent_audio("sample_b64", 999, force=True)
+        args, kwargs = mock_html.call_args
+        assert "w._hzAudio.loop = true" in args[0]
