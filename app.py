@@ -20,6 +20,7 @@ from alerts.email_alerts import EmailAlerter
 # ── SECURITY & VALIDATION UTILITIES ──
 from utils.security import (
     validate_stream_url,
+    normalize_camera_url,
     verify_model_hash,
     discover_paired_camera,
     scan_network_cameras,
@@ -33,12 +34,6 @@ from utils.security import (
     get_local_ip,
     get_all_local_ips,
     DEFAULT_BEST_PT_SHA256,
-)
-from utils.qr_pairing import (
-    create_pairing_session,
-    get_pairing_status,
-    mark_pairing_complete,
-    validate_pairing_token,
 )
 
 # Load environment variables from .env
@@ -81,171 +76,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
     page_icon="🛡️"
 )
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MOBILE QR CODE CAMERA PAIRING INTERCEPTOR (PORT 8501)
-# When a smartphone scans the QR code, it loads http://<ip>:8501/?pair_token=...
-# Handled immediately with 3-layer IP resolution, saves to registry,
-# displays sleek mobile confirmation, and halts with st.stop() to prevent YOLO loading.
-# ─────────────────────────────────────────────────────────────────────────────
-if "pair_token" in st.query_params or "token" in st.query_params:
-    pair_token = st.query_params.get("pair_token") or st.query_params.get("token")
-    raw_slot = st.query_params.get("slot", "CAM 01")
-    if raw_slot in ("CAM01", "CAM1"):
-        target_slot = "CAM 01"
-    elif raw_slot.startswith("CAM") and len(raw_slot) == 5:
-        target_slot = f"{raw_slot[:3]} {raw_slot[3:]}"
-    else:
-        target_slot = raw_slot
-
-    if not validate_pairing_token(pair_token):
-        st.markdown("""
-        <div style="background:#111820; border:1px solid #FF5C4D; border-radius:12px; padding:32px 24px; text-align:center; max-width:400px; margin:40px auto; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#E6EDF3; box-shadow:0 8px 32px rgba(0,0,0,0.6);">
-          <div style="display:inline-block; background:rgba(255,92,77,0.15); color:#FF5C4D; border:1px solid #FF5C4D; border-radius:20px; padding:6px 16px; font-size:13px; font-weight:700; margin-bottom:16px;">
-            &#10006; PAIRING REJECTED
-          </div>
-          <h2 style="color:#FF5C4D; margin:0 0 10px 0; font-size:22px;">Invalid or Expired Token</h2>
-          <p style="color:#A3B3C2; font-size:14px; line-height:1.5; margin:0 0 16px 0;">
-            This QR pairing token is invalid or has expired.<br>
-            Please generate a fresh QR code on the HazardLens command console.
-          </p>
-        </div>
-        """, unsafe_allow_html=True)
-        st.stop()
-
-    # ── 3-Layer IP Extraction & Verification ──
-    candidate_raw = None
-
-    # Layer 1: Query parameter 'phone_ip'
-    if "phone_ip" in st.query_params and st.query_params.get("phone_ip"):
-        candidate_raw = st.query_params.get("phone_ip")
-
-    # Layer 2: Tornado / Streamlit client IP & proxy headers
-    if not candidate_raw:
-        try:
-            client_ip = getattr(st.context, "ip_address", None)
-            if client_ip:
-                candidate_raw = client_ip
-        except Exception:
-            pass
-
-    if not candidate_raw:
-        try:
-            headers = getattr(st.context, "headers", None)
-            if headers:
-                for hdr in ("x-forwarded-for", "x-real-ip", "remote-addr", "client-ip"):
-                    val = headers.get(hdr)
-                    if val:
-                        first = val.split(",")[0].strip()
-                        if first:
-                            candidate_raw = first
-                            break
-        except Exception:
-            pass
-
-    # Optional Tornado websocket headers fallback (dynamic import to prevent Pylance errors)
-    if not candidate_raw:
-        try:
-            import importlib
-            ws_mod = importlib.import_module("streamlit.web.server.websocket_headers")
-            get_ws_hdr = getattr(ws_mod, "_get_websocket_headers", None)
-            if callable(get_ws_hdr):
-                ws_headers = get_ws_hdr()
-                if ws_headers:
-                    for hdr in ("x-forwarded-for", "x-real-ip", "remote-addr"):
-                        val = ws_headers.get(hdr)
-                        if val:
-                            first = val.split(",")[0].strip()
-                            if first:
-                                candidate_raw = first
-                                break
-        except Exception:
-            pass
-
-    # Clean candidate IP: strip ::ffff: prefix, brackets, and ports
-    candidate_ip = clean_ip_address(candidate_raw)
-    local_ips = get_all_local_ips()
-    camera_endpoint = None
-
-    # Step 1: If candidate_ip is a real remote IP (NOT laptop itself or loopback)
-    # AND responds on port 8080:
-    if candidate_ip and candidate_ip not in local_ips and not candidate_ip.startswith("127."):
-        test_node = f"{candidate_ip}:8080"
-        if verify_camera_handshake(test_node, timeout=0.8):
-            camera_endpoint = test_node
-
-    # Step 2: If candidate_ip is loopback, laptop itself, or failed port 8080 check:
-    # Check if existing paired camera slot is already a valid phone camera on LAN (e.g. 192.168.1.3:8080)
-    if not camera_endpoint:
-        existing_info = get_paired_camera(target_slot)
-        if existing_info and existing_info.get("last_ip_port"):
-            existing_node = existing_info["last_ip_port"].replace("::ffff:", "").strip()
-            existing_ip = clean_ip_address(existing_node)
-            if existing_ip and existing_ip not in local_ips and not existing_ip.startswith("127."):
-                if verify_camera_handshake(existing_node, user=existing_info.get("user", ""), password=existing_info.get("password", ""), timeout=0.8):
-                    camera_endpoint = existing_node
-
-    # Step 3: If still not resolved, scan the LAN for active IP Webcam nodes on port 8080
-    if not camera_endpoint:
-        discovered = discover_cameras_on_lan(port=8080, timeout=1.0)
-        for node in discovered:
-            if verify_camera_handshake(node, timeout=0.8):
-                camera_endpoint = node
-                break
-
-    if camera_endpoint:
-        clean_endpoint = camera_endpoint.replace("::ffff:", "").strip()
-        verified_ip = clean_ip_address(clean_endpoint) or clean_endpoint.split(":")[0]
-
-        # Save verified camera IP to config/paired_cameras.json
-        save_camera_slot(target_slot, clean_endpoint, user="", password="")
-        mark_pairing_complete(pair_token, verified_ip, slot=target_slot)
-
-        # Auto-arm the system so live video starts immediately!
-        st.session_state.system_armed = True
-        st.session_state.paired_camera_url = f"http://{clean_endpoint}/video"
-
-        st.markdown(f"""
-        <div style="background:#111820; border:1px solid #1F2B38; border-radius:12px; padding:32px 24px; text-align:center; max-width:420px; margin:40px auto; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#E6EDF3; box-shadow:0 8px 32px rgba(0,0,0,0.6);">
-          <div style="display:inline-block; background:rgba(61,214,140,0.15); color:#3DD68C; border:1px solid #3DD68C; border-radius:20px; padding:6px 16px; font-size:13px; font-weight:700; margin-bottom:16px;">
-            &#9679; NODE CONNECTED
-          </div>
-          <h2 style="color:#3CC8E8; margin:0 0 10px 0; font-size:24px;">HazardLens Command</h2>
-          <p style="color:#A3B3C2; font-size:15px; line-height:1.5; margin:0 0 18px 0;">
-            Your smartphone has been authenticated &amp; linked as a live surveillance feed:
-          </p>
-          <div style="background:#0B0F14; border:1px solid #2D3F53; border-radius:8px; padding:14px; font-family:monospace; color:#3DD68C; font-size:18px; font-weight:700; margin-bottom:18px;">
-            {target_slot} &middot; {clean_endpoint}
-          </div>
-          <p style="color:#7B8DA0; font-size:13px; line-height:1.5; margin:0 0 16px 0;">
-            Ensure <strong>IP Webcam</strong> is broadcasting on port 8080.<br>
-            You can now safely close this browser window.
-          </p>
-          <div style="color:#3DD68C; font-size:13px; font-weight:600;">
-            &#10004; Operator console updated in real-time
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.stop()
-    else:
-        st.markdown(f"""
-        <div style="background:#111820; border:1px solid #F2B33D; border-radius:12px; padding:32px 24px; text-align:center; max-width:420px; margin:40px auto; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#E6EDF3; box-shadow:0 8px 32px rgba(0,0,0,0.6);">
-          <div style="display:inline-block; background:rgba(242,179,61,0.15); color:#F2B33D; border:1px solid #F2B33D; border-radius:20px; padding:6px 16px; font-size:13px; font-weight:700; margin-bottom:16px;">
-            &#9888; CAMERA NOT DETECTED
-          </div>
-          <h2 style="color:#3CC8E8; margin:0 0 10px 0; font-size:22px;">HazardLens Command</h2>
-          <p style="color:#A3B3C2; font-size:14px; line-height:1.5; margin:0 0 16px 0;">
-            Device reached the server, but no active <strong>IP Webcam</strong> stream was found on port 8080.
-          </p>
-          <p style="color:#7B8DA0; font-size:13px; line-height:1.5; margin:0 0 16px 0;">
-            Please open IP Webcam on your phone, scroll to the bottom, tap <strong>Start server</strong>, then click retry.
-          </p>
-          <a href="?pair_token={pair_token}&slot={raw_slot}" style="display:inline-block; background:#3CC8E8; color:#0B0F14; text-decoration:none; font-weight:700; padding:10px 20px; border-radius:6px; font-size:14px;">
-            &#8635; Retry Pairing
-          </a>
-        </div>
-        """, unsafe_allow_html=True)
-        st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GLOBAL CSS
@@ -854,7 +684,10 @@ class CameraWorker:
         if self.is_http:
             clean_url = str(self.ip_url).rstrip("/")
             if clean_url.endswith("/video"):
-                self.shot_url = clean_url[:-6] + "/shot.jpg"
+                clean_base = clean_url[:-6].rstrip("/")
+                self.shot_url = f"{clean_base}/shot.jpg"
+            elif clean_url.endswith("/shot.jpg"):
+                self.shot_url = clean_url
             else:
                 self.shot_url = f"{clean_url}/shot.jpg"
         else:
@@ -1046,88 +879,61 @@ with st.sidebar:
                 unsafe_allow_html=True
             )
 
-    # ── ZERO-INPUT HARDWARE PAIRING & NODE MANAGEMENT ──
-    with st.expander("🔗 Pair / Manage CCTV Nodes", expanded=False):
-        st.markdown(
-            '<div style="font-family:var(--mono);font-size:11px;color:var(--mute);margin-bottom:8px;">'
-            'ZERO-INPUT HARDWARE LINK (WHATSAPP-WEB STYLE)</div>',
-            unsafe_allow_html=True
-        )
+    # ── 2-STEP CAMERA CONNECTION FLOW (CAM 01) ──
+    st.markdown('<div class="sb-lbl">▸ CAM 01 Stream Connection</div>', unsafe_allow_html=True)
+    cam_info = get_paired_camera("CAM 01")
+    current_saved_url = ""
+    if cam_info:
+        current_saved_url = cam_info.get("stream_url") or cam_info.get("last_ip_port") or ""
+        if current_saved_url and not current_saved_url.startswith(("http://", "https://")):
+            current_saved_url = f"http://{current_saved_url}"
 
-        col_p1, col_p2 = st.columns(2)
-        with col_p1:
-            btn_qr = st.button("📲 Show QR Code", width="stretch", key="btn_show_qr")
-        with col_p2:
-            btn_autolink = st.button("⚡ Auto-Link", width="stretch", key="btn_autolink_node")
+    stream_url_input = st.text_input(
+        "Camera Stream URL (Local IP or Cloudflare Tunnel)",
+        value=current_saved_url,
+        placeholder="http://192.168.1.3:8080 or https://xxx.trycloudflare.com",
+        help="Paste local IP Webcam URL or Cloudflare Tunnel endpoint",
+        key="cam_stream_url_input"
+    )
 
-        if btn_autolink:
-            with st.spinner("Scanning active Wi-Fi for IP Webcam nodes..."):
-                found_nodes = scan_network_cameras(port=8080, timeout=1.2)
-                if found_nodes:
-                    node = found_nodes[0]
-                    save_camera_slot("CAM 01", node, user="", password="")
-                    st.success(f"✅ CAM 01 Auto-Linked to {node}!")
-                    st.toast(f"✅ CAM 01 Linked to {node}!")
-                    time.sleep(0.5)
-                    st.rerun()
-                else:
-                    st.error("No active IP Webcam detected on Wi-Fi. Ensure IP Webcam broadcast is started, or scan the QR code below.")
+    btn_connect_arm = st.button("🔴 Connect & ARM", width="stretch", key="btn_connect_arm")
 
-        if "show_pairing_qr" not in st.session_state:
-            st.session_state.show_pairing_qr = False
-
-        if btn_qr:
-            st.session_state.show_pairing_qr = not st.session_state.show_pairing_qr
-
-        if st.session_state.show_pairing_qr:
-            if "qr_pairing_data" not in st.session_state:
-                st.session_state.qr_pairing_data = create_pairing_session("CAM 01")
-
-            token, pair_url, qr_bytes = st.session_state.qr_pairing_data
-
-            st.markdown(
-                f'<div style="text-align:center;padding:8px 0;">'
-                f'<div style="font-family:var(--mono);font-size:11px;color:var(--acc);margin-bottom:6px;">'
-                f'SCAN WITH PHONE CAMERA (PORT 8501)</div></div>',
-                unsafe_allow_html=True
-            )
-            st.image(qr_bytes, width=220)
-            st.caption(f"Pairing Link: `{pair_url}`")
-
-            # Check if phone has connected via QR
-            p_status = get_pairing_status(token)
-            if p_status and p_status.get("paired"):
-                st.success(f"✅ Phone linked: {p_status.get('phone_ip')}:8080")
-                if not st.session_state.get("system_armed", False):
-                    st.session_state.show_pairing_qr = False
-                    st.session_state.pop("qr_pairing_data", None)
-                    arm_system()
-                    st.rerun()
-                elif st.button("🔴 Start Live Stream", width="stretch", key="btn_refresh_after_qr"):
-                    st.session_state.show_pairing_qr = False
-                    st.session_state.pop("qr_pairing_data", None)
-                    arm_system()
-                    st.rerun()
-
-        st.markdown(
-            '<div style="font-family:var(--mono);font-size:11px;color:var(--mute);margin:12px 0 6px;">'
-            'PAIRED CCTV NODES:</div>',
-            unsafe_allow_html=True
-        )
-        registry = load_paired_cameras()
-        cam01_node = registry.get("CAM 01", {}).get("last_ip_port")
-        if cam01_node:
-            st.markdown(
-                f'<div style="font-family:var(--mono);font-size:11px;color:var(--text);display:flex;justify-content:space-between;padding:2px 0;">'
-                f'<span>CAM 01: {cam01_node}</span><span style="color:var(--ok);">🟢 Ready</span></div>',
-                unsafe_allow_html=True
-            )
+    if btn_connect_arm:
+        trimmed_input = stream_url_input.strip()
+        if not trimmed_input:
+            st.error("Please enter a valid Camera Stream URL.")
         else:
-            st.markdown(
-                f'<div style="font-family:var(--mono);font-size:11px;color:var(--mute);display:flex;justify-content:space-between;padding:2px 0;">'
-                f'<span>CAM 01: —</span><span>Unpaired (Scan QR or click Auto-Link)</span></div>',
-                unsafe_allow_html=True
-            )
+            is_valid, validated_or_err = validate_stream_url(trimmed_input)
+            if not is_valid:
+                st.error(f"Invalid URL: {validated_or_err}")
+            else:
+                normalized_url = normalize_camera_url(validated_or_err)
+                save_camera_slot("CAM 01", normalized_url)
+                st.session_state.paired_camera_url = normalized_url
+                st.session_state.system_armed = True
+
+                # Immediately start CameraWorker with the new normalized URL
+                old_worker = st.session_state.get('camera_worker')
+                if old_worker is not None:
+                    try:
+                        old_worker.stop()
+                    except Exception:
+                        pass
+                    st.session_state.camera_worker = None
+
+                new_worker = CameraWorker(
+                    ip_url=normalized_url,
+                    fire_mod=fire_model,
+                    base_mod=base_model,
+                    fire_conf=FIRE_CONF_THRESHOLD,
+                    crowd_thresh=CROWD_THRESHOLD,
+                    frame_skip=FRAME_SKIP
+                )
+                st.session_state.camera_worker = new_worker
+                new_worker.start()
+
+                st.toast("✅ CAM 01 Connected & System Armed!")
+                st.rerun()
 
     # ── SYSTEM CONTROL (1-CLICK TOGGLE) ──
     st.markdown('<div class="sb-lbl">▸ System Control</div>', unsafe_allow_html=True)

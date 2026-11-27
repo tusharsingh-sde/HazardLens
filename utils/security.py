@@ -40,10 +40,54 @@ WHITELISTED_DEMO_PATHS = frozenset({
 })
 
 
+def normalize_camera_url(url: str) -> str:
+    """
+    Normalizes camera URL to a clean base URL without trailing /video, /shot.jpg, or duplicate slashes:
+    - Automatically adds https:// for Cloudflare tunnels (*.trycloudflare.com).
+    - Automatically adds http:// if no scheme is provided for local IPs or other hosts.
+    - Strips trailing /video, /shot.jpg, and slashes cleanly so /shot.jpg can be appended without double slashes.
+    """
+    if not url or not isinstance(url, str):
+        return ""
+    trimmed = url.strip().replace("\\", "/")
+
+    parsed_init = urlparse(trimmed)
+    init_scheme = (parsed_init.scheme or "").lower()
+
+    if not (init_scheme and re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*$", init_scheme)):
+        if "trycloudflare.com" in trimmed.lower():
+            trimmed = f"https://{trimmed}"
+        else:
+            trimmed = f"http://{trimmed}"
+
+    try:
+        parsed = urlparse(trimmed)
+    except Exception:
+        return trimmed.rstrip("/")
+
+    scheme = (parsed.scheme or "http").lower()
+    netloc = parsed.netloc
+    path = parsed.path.rstrip("/")
+
+    # Strip /video or /shot.jpg from path
+    if path.endswith("/video"):
+        path = path[:-6].rstrip("/")
+    elif path.endswith("/shot.jpg"):
+        path = path[:-9].rstrip("/")
+    elif path in ("/video", "/shot.jpg"):
+        path = ""
+
+    base = f"{scheme}://{netloc}"
+    if path and path != "/":
+        base = f"{base}/{path.lstrip('/')}"
+    return base.rstrip("/")
+
+
 def validate_stream_url(url: str, allow_demo: bool = True) -> tuple[bool, str]:
     """
     Validate a video stream URL to prevent SSRF, Local File Inclusion (LFI),
     and internal cloud metadata exfiltration.
+    Allows private LAN IPs (192.168.x.x, 10.x.x.x, 172.16.0.0/12) and Cloudflare tunnels (*.trycloudflare.com).
 
     Returns:
         (True, normalized_url) if valid
@@ -73,6 +117,23 @@ def validate_stream_url(url: str, allow_demo: bool = True) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"Malformed URL: {exc}"
 
+    init_scheme = (parsed.scheme or "").lower()
+
+    # If an explicit RFC scheme is present (starts with letter), validate it against allowed schemes
+    if init_scheme and re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*$", init_scheme):
+        if init_scheme not in ALLOWED_SCHEMES:
+            return False, f"Scheme '{init_scheme}' is forbidden. Permitted schemes: http, https, rtsp, rtsps."
+    else:
+        # Infer scheme if missing (e.g. 192.168.1.3:8080 or xxx.trycloudflare.com)
+        if "trycloudflare.com" in trimmed.lower():
+            trimmed = f"https://{trimmed}"
+        else:
+            trimmed = f"http://{trimmed}"
+        try:
+            parsed = urlparse(trimmed)
+        except Exception as exc:
+            return False, f"Malformed URL: {exc}"
+
     scheme = (parsed.scheme or "").lower()
     if not scheme:
         return False, "Missing URL scheme. Use http://, https://, rtsp://, or rtsps://"
@@ -88,7 +149,11 @@ def validate_stream_url(url: str, allow_demo: bool = True) -> tuple[bool, str]:
     if hostname in {"169.254.169.254", "metadata.google.internal", "instance-data"}:
         return False, "Access to cloud instance metadata services is strictly blocked."
 
-    # Resolve IP address string if host is numeric IP
+    # Explicitly permit Cloudflare Tunnel endpoints
+    if hostname.endswith(".trycloudflare.com") or hostname == "trycloudflare.com":
+        return True, trimmed
+
+    # Resolve IP address string if host is numeric IP (blocks metadata, allows private LAN IPs)
     try:
         ip_obj = ipaddress.ip_address(hostname)
         for net in CLOUD_METADATA_NETWORKS:
@@ -447,17 +512,27 @@ def save_camera_slot(slot: str, ip_port: str, user: str = "", password: str = ""
     Strictly prevents saving the operator's laptop IP or loopback address.
     """
     registry = load_paired_cameras()
-    clean_ip_port = ip_port.strip().replace("::ffff:", "").replace("http://", "").replace("https://", "").rstrip("/")
-    raw_ip = clean_ip_port.split(":")[0] if ":" in clean_ip_port else clean_ip_port
-    raw_ip_cleaned = clean_ip_address(raw_ip)
+    trimmed = ip_port.strip().replace("::ffff:", "").rstrip("/")
+
+    # Check loopback / laptop IP
+    parsed = urlparse(trimmed if "://" in trimmed else f"http://{trimmed}")
+    hostname = parsed.hostname or trimmed
+    raw_ip_cleaned = clean_ip_address(hostname)
 
     # Safety Guard: Never register the operator's laptop or loopback as a camera feed!
     local_ips = get_all_local_ips()
     if raw_ip_cleaned in local_ips or (raw_ip_cleaned and raw_ip_cleaned.startswith("127.")):
         return False
 
+    normalized_url = normalize_camera_url(trimmed)
+    if "://" not in trimmed and not trimmed.startswith("http"):
+        last_val = trimmed.replace("http://", "").replace("https://", "").rstrip("/")
+    else:
+        last_val = normalized_url
+
     registry[slot] = {
-        "last_ip_port": clean_ip_port,
+        "last_ip_port": last_val,
+        "stream_url": normalized_url,
         "user": user.strip(),
         "password": password.strip(),
         "updated_at": datetime.now().isoformat()
@@ -563,15 +638,22 @@ def discover_cameras_on_lan(port: int = 8080, timeout: float = 1.0) -> list[str]
 
 def verify_camera_handshake(ip_port: str, user: str = "", password: str = "", timeout: float = 1.5) -> bool:
     """
-    Request http://<ip_port>/shot.jpg with HTTP Basic Auth (only if user is provided).
+    Request http(s)://<ip_port>/shot.jpg with HTTP Basic Auth (only if user is provided).
     If user is empty, sends auth=None to avoid invalid/rejected authentication headers.
     Return True only if HTTP 200 OK is returned with image/stream content.
     """
     if not ip_port:
         return False
 
-    clean_host = ip_port.strip().replace("http://", "").replace("https://", "").rstrip("/")
-    url = f"http://{clean_host}/shot.jpg"
+    trimmed = ip_port.strip().replace("::ffff:", "").rstrip("/")
+    if trimmed.startswith("https://") or "trycloudflare.com" in trimmed.lower():
+        clean_host = trimmed.replace("https://", "").replace("http://", "").rstrip("/")
+        url = f"https://{clean_host}/shot.jpg"
+    elif trimmed.startswith("http://"):
+        clean_host = trimmed.replace("http://", "").rstrip("/")
+        url = f"http://{clean_host}/shot.jpg"
+    else:
+        url = f"http://{trimmed}/shot.jpg"
 
     # Only send auth credentials if user is explicitly provided
     auth_val = (user, password) if user else None
@@ -613,43 +695,52 @@ def verify_camera_handshake(ip_port: str, user: str = "", password: str = "", ti
 def resolve_paired_camera(slot: str = "CAM 01") -> str | None:
     """
     Resolve live stream URL for the paired camera slot with Auto-IP Healing.
-    Fast Path: If slot has last_ip_port configured, cleans it and immediately returns the stream URL.
+    Fast Path: If slot has last_ip_port or stream_url configured, cleans it and immediately returns the stream URL.
     """
     cam_info = get_paired_camera(slot)
 
     def _make_stream_url(ip_p: str, u: str = "", p: str = "") -> str:
-        clean = ip_p.replace("::ffff:", "").replace("http://", "").replace("https://", "").rstrip("/")
+        clean = ip_p.replace("::ffff:", "").rstrip("/")
+        if clean.startswith("https://") or "trycloudflare.com" in clean.lower():
+            if not clean.startswith("https://") and not clean.startswith("http://"):
+                clean = f"https://{clean}"
+            return clean
+        clean = clean.replace("http://", "").rstrip("/")
         if u or p:
             return f"http://{u}:{p}@{clean}/video"
         return f"http://{clean}/video"
 
     # Fast Path: If camera was registered/configured, check and return stream URL
-    if cam_info and cam_info.get("last_ip_port"):
-        last_ip_port = cam_info.get("last_ip_port", "").strip()
+    if cam_info and (cam_info.get("stream_url") or cam_info.get("last_ip_port")):
+        configured_target = cam_info.get("stream_url") or cam_info.get("last_ip_port", "").strip()
         user = cam_info.get("user", "").strip()
         password = cam_info.get("password", "").strip()
 
+        # Cloudflare tunnel URLs fast path
+        if "trycloudflare.com" in str(configured_target).lower():
+            return _make_stream_url(str(configured_target), user, password)
+
         # Clean corrupted ::ffff: if present
-        clean_ip_port = last_ip_port.replace("::ffff:", "").strip()
-        if clean_ip_port != last_ip_port:
+        clean_ip_port = str(configured_target).replace("::ffff:", "").strip()
+        if clean_ip_port != configured_target:
             save_camera_slot(slot, clean_ip_port, user=user, password=password)
-            last_ip_port = clean_ip_port
+            configured_target = clean_ip_port
 
         # Fast handshake check
-        if verify_camera_handshake(last_ip_port, user=user, password=password, timeout=0.8):
-            return _make_stream_url(last_ip_port, user, password)
+        if verify_camera_handshake(configured_target, user=user, password=password, timeout=0.8):
+            return _make_stream_url(configured_target, user, password)
 
-        # Auto-Heal: If last_ip_port failed handshake, scan for reachable node
+        # Auto-Heal: If configured_target failed handshake, scan for reachable node
         discovered_nodes = scan_network_cameras(timeout=1.0)
         for node in discovered_nodes:
-            if node == last_ip_port:
+            if node == configured_target:
                 continue
             if verify_camera_handshake(node, user=user, password=password, timeout=1.0):
                 save_camera_slot(slot, node, user=user, password=password)
                 return _make_stream_url(node, user, password)
 
-        # Fallback to configured last_ip_port rather than dropping to demo mode
-        return _make_stream_url(last_ip_port, user, password)
+        # Fallback to configured target rather than dropping to demo mode
+        return _make_stream_url(configured_target, user, password)
 
     # Auto-Discovery Fallback: only if unconfigured, scan network
     discovered_nodes = scan_network_cameras(timeout=1.2)

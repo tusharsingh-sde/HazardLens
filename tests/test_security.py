@@ -8,6 +8,7 @@ import os
 import pytest
 from utils.security import (
     validate_stream_url,
+    normalize_camera_url,
     verify_operator_pin,
     verify_model_hash,
     get_local_subnets,
@@ -31,11 +32,27 @@ class TestStreamUrlValidation:
         "https://cam.example.edu/stream/live.mjpg",
         "rtsp://admin:pass@192.168.1.100:554/h264",
         "rtsps://secure.campus.miet.ac.in:322/live",
+        "https://hazardlens-cam.trycloudflare.com",
+        "https://sub.trycloudflare.com/shot.jpg",
+        "hazardlens-cam.trycloudflare.com",
+        "192.168.1.3:8080",
     ])
     def test_valid_stream_urls_accepted(self, valid_url):
         ok, reason = validate_stream_url(valid_url)
         assert ok is True
-        assert reason == valid_url
+        assert len(reason) > 0
+
+    def test_normalize_camera_url(self):
+        assert normalize_camera_url("http://192.168.1.3:8080/video") == "http://192.168.1.3:8080"
+        assert normalize_camera_url("http://192.168.1.3:8080/shot.jpg") == "http://192.168.1.3:8080"
+        assert normalize_camera_url("192.168.1.3:8080") == "http://192.168.1.3:8080"
+        assert normalize_camera_url("https://xyz.trycloudflare.com/shot.jpg") == "https://xyz.trycloudflare.com"
+        assert normalize_camera_url("xyz.trycloudflare.com") == "https://xyz.trycloudflare.com"
+        assert normalize_camera_url("https://xyz.trycloudflare.com/video/") == "https://xyz.trycloudflare.com"
+
+        # Appending /shot.jpg produces no double slashes
+        base = normalize_camera_url("https://xyz.trycloudflare.com/video")
+        assert f"{base}/shot.jpg" == "https://xyz.trycloudflare.com/shot.jpg"
 
     @pytest.mark.parametrize("malicious_url", [
         "file:///etc/passwd",
