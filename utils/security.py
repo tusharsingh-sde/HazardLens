@@ -166,7 +166,7 @@ def validate_stream_url(url: str, allow_demo: bool = True) -> tuple[bool, str]:
     return True, trimmed
 
 
-def verify_operator_pin(entered_pin: str, configured_pin: str) -> bool:
+def verify_operator_pin(entered_pin: str | None, configured_pin: str | None) -> bool:
     """
     Constant-time comparison for operator PIN to defend against side-channel timing attacks.
     """
@@ -179,7 +179,7 @@ def verify_operator_pin(entered_pin: str, configured_pin: str) -> bool:
     return hmac.compare_digest(entered_bytes, configured_bytes)
 
 
-def verify_model_hash(model_path: str, expected_sha256: str = None) -> tuple[bool, str]:
+def verify_model_hash(model_path: str, expected_sha256: str | None = None) -> tuple[bool, str]:
     """
     Verify the SHA-256 integrity of a YOLO PyTorch model file to protect against
     pickle deserialization / arbitrary code execution (RCE).
@@ -217,7 +217,7 @@ def clean_ip_address(ip_str: str | None) -> str | None:
     """
     if not ip_str:
         return None
-    cleaned = str(ip_str).strip()
+    cleaned = ip_str.strip()
     cleaned = cleaned.replace("http://", "").replace("https://", "").rstrip("/")
 
     # Handle bracketed host with optional port: [host]:port or [host]
@@ -256,7 +256,7 @@ def get_local_ip() -> str:
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = info[4][0]
+            ip = str(info[4][0])
             if not ip.startswith("127."):
                 return ip
     except Exception:
@@ -274,7 +274,7 @@ def get_all_local_ips() -> set[str]:
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None):
-            raw = info[4][0]
+            raw = str(info[4][0])
             clean = clean_ip_address(raw)
             if clean:
                 local_ips.add(clean)
@@ -307,7 +307,7 @@ def get_local_subnets() -> list[str]:
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = info[4][0]
+            ip = str(info[4][0])
             if not ip.startswith("127."):
                 net = ipaddress.ip_network(f"{ip}/24", strict=False)
                 subnets.add(str(net))
@@ -378,11 +378,11 @@ def _verify_camera_endpoint(
 
 
 def discover_paired_camera(
-    port: int = None,
-    user: str = None,
-    secret: str = None,
+    port: int | None = None,
+    user: str | None = None,
+    secret: str | None = None,
     timeout: float = 0.3,
-    cached_url: str = None
+    cached_url: str | None = None
 ) -> str | None:
     """
     Auto-discovers and cryptographically authenticates paired CCTV node on local network.

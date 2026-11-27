@@ -117,12 +117,18 @@ st.markdown("""
 header[data-testid="stHeader"] {
   background: transparent !important;
   color: var(--text) !important;
+  pointer-events: none !important;
+  z-index: 999999 !important;
 }
-/* Keep stToolbar container visible so stExpandSidebarButton is accessible */
-[data-testid="stToolbar"] {
+/* Allow clicks on the toolbar and expand controls */
+[data-testid="stToolbar"],
+[data-testid="stExpandSidebarButton"],
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"] {
   visibility: visible !important;
   display: flex !important;
   background: transparent !important;
+  pointer-events: auto !important;
 }
 /* Hide ONLY the right-side toolbar items, deploy button, status widget, footer, and decorations */
 [data-testid="stToolbarActions"],
@@ -136,23 +142,43 @@ footer,
 }
 /* Ensure sidebar reopen/expand button remains prominently visible and clickable */
 [data-testid="stExpandSidebarButton"],
-[data-testid="collapsedControl"] {
-  visibility: visible !important;
-  display: flex !important;
-  color: var(--text) !important;
-  opacity: 1 !important;
-}
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"],
 [data-testid="stExpandSidebarButton"] button,
-[data-testid="collapsedControl"] button {
-  color: var(--text) !important;
-  background: var(--surface) !important;
-  border: 1px solid var(--border) !important;
+[data-testid="stSidebarCollapseButton"] button,
+[data-testid="collapsedControl"] button,
+button[data-testid="stExpandSidebarButton"],
+button[data-testid="stSidebarCollapseButton"] {
+  visibility: visible !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: #FAFAFA !important;
+  background: #18181B !important;
+  border: 1px solid #27272A !important;
   border-radius: 6px !important;
+  padding: 6px 10px !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  cursor: pointer !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4) !important;
 }
+[data-testid="stExpandSidebarButton"]:hover,
+[data-testid="stSidebarCollapseButton"]:hover,
+[data-testid="collapsedControl"]:hover,
 [data-testid="stExpandSidebarButton"] button:hover,
+[data-testid="stSidebarCollapseButton"] button:hover,
 [data-testid="collapsedControl"] button:hover {
   background: #27272A !important;
   border-color: var(--border-hover) !important;
+  color: #FFFFFF !important;
+}
+[data-testid="stExpandSidebarButton"] svg,
+[data-testid="stSidebarCollapseButton"] svg,
+[data-testid="collapsedControl"] svg {
+  fill: #FAFAFA !important;
+  color: #FAFAFA !important;
+  stroke: #FAFAFA !important;
 }
 *, *::before, *::after {
   box-sizing: border-box;
@@ -554,18 +580,31 @@ div[data-testid="stImage"] img {
   background: var(--viewport);
 }
 /* Hide Streamlit default image fullscreen hover button and element toolbar */
+.stElementToolbar,
 [data-testid="stElementToolbar"],
 [data-testid="stElementToolbarButton"],
 [data-testid="stElementToolbarButtonContainer"],
 [data-testid="StyledFullScreenButton"],
+button[title*="fullscreen" i],
+button[aria-label*="fullscreen" i],
 button[title="View fullscreen"],
 button[title="Exit fullscreen"],
 div[data-testid="stImage"] button,
-div[data-testid="stFullScreenFrame"] [data-testid="stElementToolbar"] {
+div[data-testid="stImage"] .stElementToolbar,
+div[data-testid="stImage"] [data-testid="stElementToolbar"],
+div[data-testid="stImage"] [data-testid="stElementToolbarButtonContainer"],
+div[data-testid="stFullScreenFrame"] [data-testid="stElementToolbar"],
+.stApp [data-testid="stElementToolbar"],
+.stApp .stElementToolbar {
   display: none !important;
   visibility: hidden !important;
   opacity: 0 !important;
   pointer-events: none !important;
+  height: 0 !important;
+  width: 0 !important;
+  max-height: 0 !important;
+  max-width: 0 !important;
+  overflow: hidden !important;
 }
 
 /* ── ALERT BANNER ── */
@@ -853,7 +892,7 @@ def _render_audio_html(html_snippet: str):
     # Fallback to components.html with height=0, width=0
     components.html(html_snippet, height=0, width=0)
 
-def play_persistent_audio(b64_audio: str = None, audio_id: int = 0, force: bool = False):
+def play_persistent_audio(b64_audio: str | None = None, audio_id: int = 0, force: bool = False):
     """
     Plays audio via the top-level parent window Web Audio controller to prevent
     fragment unmount and Diff resets every 0.5s. Loops infinitely with a 1.2s pause
@@ -1158,7 +1197,7 @@ with st.sidebar:
                 if saved_url:
                     target_url = saved_url
                 else:
-                    target_url = "assets/demo_feed.mp4"
+                    st.error("Please enter a valid Camera Stream URL to connect.")
 
             if target_url:
                 st.session_state.paired_camera_url = target_url
@@ -1224,9 +1263,9 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 armed = st.session_state.system_armed
 if armed:
-    ip_url = st.session_state.get('paired_camera_url') or resolve_paired_camera("CAM 01") or "assets/demo_feed.mp4"
+    ip_url = st.session_state.get('paired_camera_url') or resolve_paired_camera("CAM 01") or ""
 else:
-    ip_url = "assets/demo_feed.mp4"
+    ip_url = ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SLIM HEADER BAR
@@ -1363,6 +1402,22 @@ def render_cam_01_feed(stream_url):
           </div>
         </div>""", unsafe_allow_html=True)
         st.image(create_placeholder("CAM 01", "STANDBY"), width="stretch")
+        return
+
+    # If stream_url is not configured yet
+    if not stream_url:
+        st.markdown(f"""
+        <div class="cam-card-hdr">
+          <div class="cam-card-meta">
+            <span class="cam-id">CAM 01</span>
+            <span class="cam-name">MIET College Main Gate</span>
+          </div>
+          <div class="cam-card-right">
+            <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+            {offline_badge}
+          </div>
+        </div>""", unsafe_allow_html=True)
+        st.image(create_placeholder("CAM 01", "NO SIGNAL"), width="stretch")
         return
 
     # When armed, ensure background worker is running for stream_url

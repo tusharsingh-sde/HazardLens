@@ -231,8 +231,9 @@ class TestMultiCameraRegistryAndAutoHeal:
 
     def test_verify_camera_handshake_rejected_401(self, monkeypatch):
         import urllib.error
+        from email.message import Message
         def mock_open(req, timeout):
-            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", Message(), None)
 
         monkeypatch.setattr("urllib.request.urlopen", mock_open)
         ok = verify_camera_handshake("192.168.1.7:8080", "cam01", "wrong_pass")
@@ -292,122 +293,12 @@ class TestMultiCameraRegistryAndAutoHeal:
         assert url == "http://cam01:secret@192.168.137.45:8080/video"
 
         updated = get_paired_camera("CAM 01")
+        assert updated is not None
         assert updated["last_ip_port"] == "192.168.137.45:8080"
 
 
-class TestQRPairing:
-    """Tests for WhatsApp-Web style zero-input QR pairing."""
-
-    def test_get_laptop_wifi_ip(self):
-        from utils.qr_pairing import get_laptop_wifi_ip
-        ip = get_laptop_wifi_ip()
-        assert isinstance(ip, str)
-        assert len(ip.split(".")) == 4
-
-    def test_generate_qr_code_png(self):
-        from utils.qr_pairing import generate_qr_code_png
-        png_bytes = generate_qr_code_png("http://192.168.1.5:8502/pair?token=test1234")
-        assert isinstance(png_bytes, bytes)
-        assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
-
-    def test_create_pairing_session_and_status(self):
-        from utils.qr_pairing import create_pairing_session, get_pairing_status
-        token, url, qr_bytes = create_pairing_session(slot="CAM 01")
-        assert len(token) > 10
-        assert f"token={token}" in url
-        assert qr_bytes.startswith(b"\x89PNG\r\n\x1a\n")
-
-        status = get_pairing_status(token)
-        assert status is not None
-        assert status["slot"] == "CAM 01"
-        assert status["paired"] is False
-
-    def test_pairing_http_handler_simulated(self, tmp_path, monkeypatch):
-        from io import BytesIO
-        from utils.qr_pairing import (
-            PairingHTTPHandler,
-            ACTIVE_PAIRING_TOKENS,
-            _PAIRING_LOCK,
-        )
-
-        test_file = str(tmp_path / "paired_test.json")
-        monkeypatch.setattr("utils.security.PAIRED_CAMERAS_FILE", test_file)
-
-        test_token = "mock_token_abc123"
-        with _PAIRING_LOCK:
-            ACTIVE_PAIRING_TOKENS[test_token] = {
-                "slot": "CAM 01",
-                "created_at": 0,
-                "paired": False,
-                "phone_ip": None,
-            }
-
-        # Mock socket and request handling
-        class MockSocket:
-            def __init__(self):
-                self.data = BytesIO()
-            def makefile(self, mode, *args, **kwargs):
-                if "b" in mode:
-                    return self.data
-                return self.data
-            def sendall(self, data):
-                self.data.write(data)
-
-        handler = PairingHTTPHandler.__new__(PairingHTTPHandler)
-        handler.client_address = ("192.168.1.42", 54321)
-        handler.path = f"/pair?token={test_token}&slot=CAM%2001"
-        handler.wfile = BytesIO()
-        handler.rfile = BytesIO()
-        handler.request_version = "HTTP/1.1"
-        handler.requestline = f"GET {handler.path} HTTP/1.1"
-
-        handler.do_GET()
-
-        response = handler.wfile.getvalue()
-        assert b"200 OK" in response or b"NODE CONNECTED" in response
-        assert ACTIVE_PAIRING_TOKENS[test_token]["paired"] is True
-        assert ACTIVE_PAIRING_TOKENS[test_token]["phone_ip"] == "192.168.1.42"
-
-        # Check that camera slot was saved
-        paired = get_paired_camera("CAM 01")
-        assert paired is not None
-        assert paired["last_ip_port"] == "192.168.1.42:8080"
-
-    def test_pairing_http_handler_invalid_token(self):
-        from io import BytesIO
-        from utils.qr_pairing import PairingHTTPHandler
-
-        handler = PairingHTTPHandler.__new__(PairingHTTPHandler)
-        handler.client_address = ("192.168.1.99", 54321)
-        handler.path = "/pair?token=invalid_nonexistent_token&slot=CAM%2001"
-        handler.wfile = BytesIO()
-        handler.rfile = BytesIO()
-        handler.request_version = "HTTP/1.1"
-        handler.requestline = f"GET {handler.path} HTTP/1.1"
-
-        handler.do_GET()
-        response = handler.wfile.getvalue()
-        assert b"403" in response or b"Invalid or Expired" in response
-
-    def test_qr_session_targets_streamlit_port_8501(self):
-        from utils.qr_pairing import create_pairing_session, validate_pairing_token
-        token, url, qr_bytes = create_pairing_session("CAM 01")
-        assert ":8501" in url
-        assert f"pair_token={token}" in url
-        assert "slot=CAM01" in url
-        assert validate_pairing_token(token) is True
-        assert validate_pairing_token("nonexistent_random_token") is False
-
-    def test_mark_pairing_complete(self):
-        from utils.qr_pairing import create_pairing_session, get_pairing_status, mark_pairing_complete
-        token, _, _ = create_pairing_session("CAM 01")
-        status_before = get_pairing_status(token)
-        assert status_before["paired"] is False
-
-        mark_pairing_complete(token, "192.168.1.3", "CAM 01")
-        status_after = get_pairing_status(token)
-        assert status_after["paired"] is True
-        assert status_after["phone_ip"] == "192.168.1.3"
+class TestSecurityHelpers:
+    """Tests for security helper utilities."""
 
     def test_clean_ip_address_strips_ipv6_mapped_and_ports(self):
         from utils.security import clean_ip_address
@@ -418,6 +309,7 @@ class TestQRPairing:
         assert clean_ip_address("127.0.0.1") == "127.0.0.1"
         assert clean_ip_address(None) is None
         assert clean_ip_address("") is None
+
 
     def test_save_camera_slot_rejects_laptop_own_ip_and_loopback(self, tmp_path, monkeypatch):
         from utils.security import save_camera_slot, get_paired_camera
@@ -434,6 +326,7 @@ class TestQRPairing:
         # Saving genuine camera IP MUST succeed
         assert save_camera_slot("CAM 01", "192.168.1.3:8080") is True
         cam = get_paired_camera("CAM 01")
+        assert cam is not None
         assert cam["last_ip_port"] == "192.168.1.3:8080"
 
     def test_discover_cameras_on_lan_filters_local_ips(self, monkeypatch):

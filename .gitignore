@@ -15,3 +15,9 @@ old_best.pt
 
 # Ignore Local Hardware Camera Registry (contains private camera IPs & credentials)
 config/paired_cameras.json
+
+# Ignore Local Editor / Language Server Settings
+.vscode/
+pyrightconfig.json
+pyrefly.toml
+pyproject.toml
