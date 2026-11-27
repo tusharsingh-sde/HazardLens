@@ -71,298 +71,598 @@ model_inference_lock = threading.Lock()
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="HazardLens | Command Center",
+    page_title="HazardLens | Enterprise NVR",
     layout="wide",
-    initial_sidebar_state="expanded",
-    page_icon="🛡️"
+    initial_sidebar_state="expanded"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GLOBAL CSS
+# GLOBAL CSS — Minimalist Enterprise NVR Design System (Linear / Verkada / Vercel)
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-  --bg:    #0B0F14;
-  --s1:    #111820;
-  --s2:    #17212C;
-  --line:  #1F2B38;
-  --line2: #2D3C4D;
-  --text:  #E6EDF3;
-  --text2: #A3B3C2;
-  --mute:  #7B8DA0;
-  --acc:   #3CC8E8;
-  --crit:  #FF5C4D;
-  --warn:  #F2B33D;
-  --ok:    #3DD68C;
-  --mono:  'IBM Plex Mono', ui-monospace, monospace;
-  --sans:  'IBM Plex Sans', system-ui, sans-serif;
-  --cond:  'IBM Plex Sans Condensed', 'IBM Plex Sans', sans-serif;
+  --bg:               #09090B;
+  --surface:          #111114;
+  --surface-elevated: #18181B;
+  --viewport:         #0C0C0E;
+  --border:           #27272A;
+  --border-hover:     #3F3F46;
+  --border-subtle:    #1F1F23;
+  --text:             #FAFAFA;
+  --text-muted:       #71717A;
+  --text-sub:         #A1A1AA;
+  --emerald:          #10B981;
+  --emerald-dim:      rgba(16, 185, 129, 0.1);
+  --emerald-border:   rgba(16, 185, 129, 0.25);
+  --red:              #EF4444;
+  --red-dim:          rgba(239, 68, 68, 0.1);
+  --red-border:       rgba(239, 68, 68, 0.25);
+  --amber:            #F59E0B;
+  --amber-dim:        rgba(245, 158, 11, 0.1);
+  --amber-border:     rgba(245, 158, 11, 0.25);
+  --sans:             'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --mono:             'JetBrains Mono', ui-monospace, monospace;
 }
 
-/* ── BASE ── */
-.stApp, .main { background: var(--bg) !important; color: var(--text) !important; }
-#MainMenu, footer { visibility: hidden !important; }
-*, *::before, *::after { box-sizing: border-box; }
-div.block-container { padding-top: 1rem !important; padding-bottom: 1rem !important; }
+/* ── BASE APPLICATION ── */
+.stApp, .main {
+  background: var(--bg) !important;
+  color: var(--text) !important;
+  font-family: var(--sans) !important;
+}
+/* Keep header transparent so sidebar toggle button is visible at top-left */
+header[data-testid="stHeader"] {
+  background: transparent !important;
+  color: var(--text) !important;
+}
+/* Keep stToolbar container visible so stExpandSidebarButton is accessible */
+[data-testid="stToolbar"] {
+  visibility: visible !important;
+  display: flex !important;
+  background: transparent !important;
+}
+/* Hide ONLY the right-side toolbar items, deploy button, status widget, footer, and decorations */
+[data-testid="stToolbarActions"],
+[data-testid="stDeployButton"],
+[data-testid="stStatusWidget"],
+#MainMenu,
+footer,
+[data-testid="stDecoration"] {
+  visibility: hidden !important;
+  display: none !important;
+}
+/* Ensure sidebar reopen/expand button remains prominently visible and clickable */
+[data-testid="stExpandSidebarButton"],
+[data-testid="collapsedControl"] {
+  visibility: visible !important;
+  display: flex !important;
+  color: var(--text) !important;
+  opacity: 1 !important;
+}
+[data-testid="stExpandSidebarButton"] button,
+[data-testid="collapsedControl"] button {
+  color: var(--text) !important;
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 6px !important;
+}
+[data-testid="stExpandSidebarButton"] button:hover,
+[data-testid="collapsedControl"] button:hover {
+  background: #27272A !important;
+  border-color: var(--border-hover) !important;
+}
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+div.block-container {
+  padding-top: 1.25rem !important;
+  padding-bottom: 2rem !important;
+  max-width: 100% !important;
+}
 
-/* ── SIDEBAR ── */
+/* ── SIDEBAR & TOP ALIGNMENT ── */
 section[data-testid="stSidebar"] {
-  background: var(--s1) !important;
-  border-right: 1px solid var(--line) !important;
+  background: var(--surface) !important;
+  border-right: 1px solid var(--border) !important;
+}
+[data-testid="stSidebarHeader"] {
+  padding: 0.5rem 1rem 0 1rem !important;
+  min-height: auto !important;
+  height: auto !important;
+}
+[data-testid="stSidebarHeader"] button {
+  color: var(--text-muted) !important;
+}
+[data-testid="stSidebarHeader"] button:hover {
+  color: var(--text) !important;
+}
+[data-testid="stSidebarUserContent"] {
+  padding-top: 0.25rem !important;
+  padding-left: 1rem !important;
+  padding-right: 1rem !important;
 }
 
-/* ── HEADER ── */
-.hz-hdr {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px 28px;
-  padding: 10px 24px;
-  background: var(--s1);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  margin-bottom: 12px;
-}
-.hz-brand {
+/* ── BRANDING ── */
+.sb-brand {
   display: flex;
   align-items: center;
   gap: 12px;
+  padding-bottom: 14px;
+  margin: 0 0 18px 0;
+  border-bottom: 1px solid #202024;
 }
-.hz-logo { flex: 0 0 auto; }
-.hz-name {
-  font: 600 20px/1 var(--cond);
-  letter-spacing: .06em;
+.sb-badge {
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: linear-gradient(180deg, #1F1F23 0%, #141417 100%);
+  border: 1px solid #2E2E34;
+  border-radius: 10px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.sb-brand-text {
+  display: flex;
+  flex-direction: column;
+}
+.sb-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
+}
+.sb-title {
+  font-family: var(--sans);
+  font-size: 18px;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.sb-title .word-hazard {
+  color: #FAFAFA;
+  font-weight: 700;
+}
+.sb-title .word-lens {
+  color: #A1A1AA;
+  font-weight: 500;
+}
+.sb-nvr-badge {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
   text-transform: uppercase;
-  color: var(--text);
+  color: #A1A1AA;
+  background: #18181B;
+  border: 1px solid #27272A;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  line-height: 1;
 }
-.hz-name em { color: var(--acc); font-style: normal; }
-.hz-sub {
-  font: 500 11px/1.2 var(--mono);
-  letter-spacing: .1em;
+.sb-subtitle {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--mute);
-  margin-top: 3px;
-}
-.hz-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-left: auto; }
-
-.stat-pill {
-  background: var(--s2);
-  border: 1px solid var(--line2);
-  border-radius: 3px;
-  padding: 6px 14px;
-  text-align: center;
-  min-width: 72px;
-}
-.stat-v { display: block; font: 500 20px/1 var(--mono); color: var(--acc); }
-.stat-l { font: 500 11px/1.2 var(--mono); color: var(--mute); letter-spacing: .1em; text-transform: uppercase; }
-
-.arm-on {
-  display: inline-flex; align-items: center; gap: 8px;
-  height: 44px; padding: 0 18px;
-  border: 1px solid var(--ok); border-radius: 3px;
-  background: rgba(61,214,140,.08);
-  font: 600 13px var(--sans); color: var(--ok);
-  letter-spacing: .02em;
-}
-.arm-off {
-  display: inline-flex; align-items: center; gap: 8px;
-  height: 44px; padding: 0 18px;
-  border: 1px solid var(--line2); border-radius: 3px;
-  background: var(--s2);
-  font: 600 13px var(--sans); color: var(--mute);
-  letter-spacing: .02em;
-}
-
-/* PULSING DOTS */
-@keyframes hzPulse { 0%,100%{opacity:1} 50%{opacity:.25} }
-@keyframes hzPulseFast { 0%,100%{opacity:1} 50%{opacity:.1} }
-.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-.dot-g { background: var(--ok);   animation: hzPulse 1.4s ease-in-out infinite; }
-.dot-a { background: var(--warn); animation: hzPulse 1.4s ease-in-out infinite; }
-.dot-r { background: var(--crit); animation: hzPulseFast .7s ease-in-out infinite; }
-
-/* ── ALERT BANNERS ── */
-@keyframes si { from{transform:translateY(-6px);opacity:0;} to{transform:translateY(0);opacity:1;} }
-
-.a-fire {
-  display: flex; flex-wrap: wrap; align-items: center;
-  gap: 16px 28px; padding: 16px 24px; margin: 6px 0;
-  background: rgba(255,92,77,.08);
-  border: 1px solid var(--crit);
-  border-radius: 4px;
-  animation: si .25s ease;
-}
-.a-crwd {
-  display: flex; flex-wrap: wrap; align-items: center;
-  gap: 16px 28px; padding: 16px 24px; margin: 6px 0;
-  background: rgba(242,179,61,.08);
-  border: 1px solid var(--warn);
-  border-radius: 4px;
-  animation: si .25s ease;
-}
-.a-ico-wrap {
-  flex: 0 0 auto; width: 48px; height: 48px;
-  display: flex; align-items: center; justify-content: center;
-  border: 1px solid currentColor; border-radius: 2px;
-}
-.a-fire .a-ico-wrap { color: var(--crit); }
-.a-crwd .a-ico-wrap { color: var(--warn); }
-.a-kicker {
-  font: 500 11px/1.2 var(--mono);
-  letter-spacing: .12em; text-transform: uppercase;
-}
-.a-fire .a-kicker { color: var(--crit); }
-.a-crwd .a-kicker { color: var(--warn); }
-.a-ttl {
+  color: #71717A;
   margin-top: 4px;
-  font: 600 20px/1.15 var(--cond);
-  letter-spacing: .01em;
+  line-height: 1;
+}
+.sb-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 20px 0 16px;
+}
+.sb-section-title {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.sb-settings-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sb-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.sb-setting-label {
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.sb-setting-val {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
   color: var(--text);
 }
-.a-msg { margin-top: 4px; font-size: 13px; color: var(--text2); }
 
-/* ── SECTION LABEL ── */
-.sec-lbl {
-  font: 500 11px/1.2 var(--mono);
-  letter-spacing: .1em; text-transform: uppercase;
-  color: var(--mute);
-  margin: 14px 0 8px;
-  display: flex; align-items: center; gap: 10px;
+/* ── STREAMLIT INPUTS ── */
+div[data-testid="stTextInput"] label {
+  font-family: var(--sans) !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: var(--text-muted) !important;
+  letter-spacing: 0.04em !important;
+  text-transform: uppercase !important;
+  margin-bottom: 6px !important;
 }
-.sec-lbl::after { content:''; flex:1; height:1px; background: var(--line); }
-
-/* ── CAMERA CARD HEADER ── */
-.cam-hdr {
-  background: var(--s2);
-  border: 1px solid var(--line); border-bottom: none;
-  border-radius: 4px 4px 0 0;
-  padding: 10px 16px;
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+div[data-testid="stTextInput"] input {
+  background: var(--surface-elevated) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text) !important;
+  font-family: var(--mono) !important;
+  font-size: 12px !important;
+  border-radius: 6px !important;
+  padding: 8px 12px !important;
 }
-.cam-hdr.live { border-color: var(--acc); }
-.cam-nm  { font: 500 12px/1.2 var(--mono); letter-spacing: .1em; color: var(--acc); }
-.cam-loc { margin-top: 2px; font: 500 13px/1.2 var(--sans); color: var(--text); }
-
-.badge-live  {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 26px; padding: 0 10px;
-  border: 1px solid var(--crit); border-radius: 3px;
-  font: 500 11px/1 var(--mono); color: var(--crit); letter-spacing: .1em;
+div[data-testid="stTextInput"] input:focus {
+  border-color: var(--border-hover) !important;
+  box-shadow: 0 0 0 1px #3F3F46 !important;
 }
-.badge-stdby {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 26px; padding: 0 10px;
-  border: 1px solid var(--line2); border-radius: 3px;
-  font: 500 11px/1 var(--mono); color: var(--mute); letter-spacing: .08em;
-}
-
-/* ── METRIC STRIP ── */
-.mstrip {
-  background: var(--s2); border: 1px solid var(--line); border-top: none; border-bottom: none;
-  padding: 8px 16px; display: flex; align-items: center; justify-content: space-between;
-}
-.mstrip .ml { font: 500 11px/1.2 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--mute); }
-.mstrip .mv { font: 500 20px/1 var(--mono); color: var(--acc); }
-.mstrip .mv.off { color: var(--mute); font-size: 15px; }
-
-/* ── IMAGE ── */
-div[data-testid="stImage"] { margin: 0 !important; padding: 0 !important; position: relative; }
-div[data-testid="stImage"] img {
-  display: block; width: 100%;
-  border: 1px solid var(--line); border-top: none; border-radius: 0;
-}
-div[data-testid="stImage"]::after {
-  content: '';
-  position: absolute; inset: 0;
-  background: repeating-linear-gradient(0deg, rgba(255,255,255,.018) 0 1px, transparent 1px 3px);
-  pointer-events: none; z-index: 5;
+div[data-testid="stTextInput"] input::placeholder {
+  color: #52525B !important;
 }
 
 /* ── BUTTONS ── */
 div[data-testid="stButton"] > button {
   font-family: var(--sans) !important;
-  font-size: 13px !important; font-weight: 600 !important;
-  letter-spacing: .02em !important;
-  border-radius: 0 0 4px 4px !important;
-  border: 1px solid var(--line) !important; border-top: none !important;
-  width: 100% !important;
-  background: var(--s2) !important; color: var(--text2) !important;
-  padding: 10px 12px !important; transition: all .15s ease !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  border-radius: 6px !important;
+  padding: 9px 14px !important;
+  border: 1px solid var(--border) !important;
+  background: var(--surface-elevated) !important;
+  color: var(--text) !important;
+  transition: all 0.15s ease !important;
 }
 div[data-testid="stButton"] > button:hover {
-  background: var(--s1) !important; color: var(--acc) !important;
-  border-color: var(--acc) !important;
+  background: #27272A !important;
+  border-color: var(--border-hover) !important;
+  color: #FFFFFF !important;
+}
+div[data-testid="stButton"] > button[kind="primary"] {
+  background: #FAFAFA !important;
+  color: #09090B !important;
+  border: 1px solid #FAFAFA !important;
+  font-weight: 700 !important;
+}
+div[data-testid="stButton"] > button[kind="primary"]:hover {
+  background: #E4E4E7 !important;
+  border-color: #E4E4E7 !important;
+}
+button:has(p:contains("DISARM SYSTEM")),
+button:has(div:contains("DISARM SYSTEM")) {
+  background: var(--red-dim) !important;
+  border: 1px solid var(--red-border) !important;
+  color: var(--red) !important;
+}
+button:has(p:contains("DISARM SYSTEM")):hover,
+button:has(div:contains("DISARM SYSTEM")):hover {
+  background: rgba(239, 68, 68, 0.18) !important;
+  border-color: var(--red) !important;
+}
+button:has(p:contains("Silence Alert")),
+button:has(div:contains("Silence Alert")) {
+  background: var(--red-dim) !important;
+  border: 1px solid var(--red-border) !important;
+  color: var(--red) !important;
+  margin-top: 6px !important;
+}
+button:has(p:contains("Silence Alert")):hover,
+button:has(div:contains("Silence Alert")):hover {
+  background: rgba(239, 68, 68, 0.2) !important;
 }
 
-/* ── TEXT INPUT ── */
-div[data-testid="stTextInput"] input {
-  background: var(--s2) !important; border: 1px solid var(--line) !important;
-  color: var(--acc) !important; font: 400 13px var(--mono) !important;
-  letter-spacing: .04em !important; border-radius: 3px !important;
+/* ── SLIM HEADER BAR ── */
+.hz-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 16px;
 }
-div[data-testid="stTextInput"] input:focus {
-  border-color: var(--acc) !important; box-shadow: 0 0 0 1px rgba(60,200,232,.25) !important;
+.hz-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
-div[data-testid="stTextInput"] label {
-  font: 500 11px var(--mono) !important;
-  color: var(--mute) !important; letter-spacing: .1em !important; text-transform: uppercase !important;
+.hz-title {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.hz-loc-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.hz-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.pill-label {
+  font-family: var(--sans);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.pill-val {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text);
+  font-size: 11px;
+}
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.status-armed {
+  background: var(--red-dim);
+  border: 1px solid var(--red-border);
+  color: var(--red);
+}
+.status-standby {
+  background: var(--amber-dim);
+  border: 1px solid var(--amber-border);
+  color: var(--amber);
 }
 
-/* ── SIDEBAR COMPONENTS ── */
-.sb-title {
-  font: 600 15px/1.2 var(--cond); color: var(--acc); letter-spacing: .06em;
-  text-transform: uppercase; padding-bottom: 12px; margin-bottom: 12px;
-  border-bottom: 1px solid var(--line);
+/* ── PULSE DOTS ── */
+@keyframes dotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.9); }
 }
-.sb-lbl { font: 500 11px/1.2 var(--mono); color: var(--mute); letter-spacing: .1em; text-transform: uppercase; padding: 12px 0 7px; }
-.sb-row {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 8px 12px; margin: 3px 0;
-  background: var(--s2); border: 1px solid var(--line); border-radius: 3px;
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
 }
-.sb-rn    { font: 500 13px var(--sans); color: var(--text); }
-.sb-rloc  { font: 400 12px var(--mono); color: var(--mute); letter-spacing: .04em; margin-top: 2px; }
-.sb-rs    { font: 500 11px var(--mono); letter-spacing: .08em; }
-.sysinfo  {
-  font: 400 12px/2 var(--mono); color: var(--mute);
-  padding: 10px 14px; background: var(--s2); border: 1px solid var(--line); border-radius: 3px;
+.dot-emerald { background: var(--emerald); animation: dotPulse 1.8s ease-in-out infinite; }
+.dot-red     { background: var(--red);     animation: dotPulse 1.0s ease-in-out infinite; }
+.dot-amber   { background: var(--amber);   animation: dotPulse 2.0s ease-in-out infinite; }
+.dot-muted   { background: #52525B; }
+
+/* ── CAMERA CARDS ── */
+.cam-card-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+}
+.cam-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cam-id {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+.cam-name {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-sub);
+}
+.cam-card-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.cam-crowd-count {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.badge-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.badge-live {
+  background: var(--emerald-dim);
+  border: 1px solid var(--emerald-border);
+  color: var(--emerald);
+}
+.badge-warn {
+  background: var(--amber-dim);
+  border: 1px solid var(--amber-border);
+  color: var(--amber);
+}
+.badge-offline {
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+/* ── CAMERA VIEWPORT IMAGES ── */
+div[data-testid="stImage"] {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+div[data-testid="stImage"] img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 0 0 8px 8px;
+  background: var(--viewport);
+}
+/* Hide Streamlit default image fullscreen hover button and element toolbar */
+[data-testid="stElementToolbar"],
+[data-testid="stElementToolbarButton"],
+[data-testid="stElementToolbarButtonContainer"],
+[data-testid="StyledFullScreenButton"],
+button[title="View fullscreen"],
+button[title="Exit fullscreen"],
+div[data-testid="stImage"] button,
+div[data-testid="stFullScreenFrame"] [data-testid="stElementToolbar"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* ── ALERT BANNER ── */
+@keyframes si {
+  from { transform: translateY(-4px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.a-banner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 18px;
+  margin-bottom: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  animation: si 0.2s ease;
+}
+.a-fire {
+  border-left: 3px solid var(--red);
+}
+.a-crwd {
+  border-left: 3px solid var(--amber);
+}
+.a-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+}
+.a-fire .a-icon {
+  background: var(--red-dim);
+  color: var(--red);
+}
+.a-crwd .a-icon {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+.a-content {
+  flex: 1;
+}
+.a-kicker {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.a-fire .a-kicker { color: var(--red); }
+.a-crwd .a-kicker { color: var(--amber); }
+.a-ttl {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.a-msg {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
 }
 
 /* ── FOOTER STATUS BAR ── */
 .ftr {
-  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px;
-  padding: 12px 24px; margin-top: 16px;
-  border-top: 1px solid var(--line); border: 1px solid var(--line);
-  background: var(--s1); border-radius: 4px;
-  font: 400 11px/1.4 var(--mono); letter-spacing: .06em; color: var(--mute);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 20px;
+  padding: 10px 16px;
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
 }
-.ftr .online { color: var(--ok); }
 
-/* ── TOAST ── */
+/* ── TOAST & SCROLLBAR ── */
 div[data-testid="stToast"] {
-  background: rgba(61,214,140,.08) !important; border: 1px solid var(--ok) !important;
-  color: var(--ok) !important; font-family: var(--sans) !important;
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text) !important;
+  font-family: var(--sans) !important;
+  border-radius: 8px !important;
 }
-
-/* ── SCROLLBAR ── */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 2px; }
+::-webkit-scrollbar-thumb { background: var(--border-hover); border-radius: 2px; }
 
-/* Sidebar buttons — no bottom-only radius */
-section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
-  border-radius: 3px !important;
-  border: 1px solid var(--line) !important;
-  border-top: 1px solid var(--line) !important;
-}
-section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
-  border-color: var(--acc) !important;
-}
-
-/* Keep background alert audio player hidden so it does not distort camera grid layout */
+/* Hidden background audio player */
 div[data-testid="stAudio"] {
   display: none !important;
 }
@@ -397,7 +697,7 @@ def load_twin_models():
     # Model integrity check to mitigate pickle deserialization risks (RCE)
     ok, val = verify_model_hash('best.pt')
     if not ok:
-        st.error(f"🚨 CRITICAL SECURITY ALERT: Model integrity verification failed: {val}")
+        st.error(f"CRITICAL SECURITY ALERT: Model integrity verification failed: {val}")
         st.stop()
     fire_mod = YOLO('best.pt')      # Custom Fire / Smoke model
     base_mod = YOLO('yolov8n.pt')   # Standard model for crowd counting
@@ -461,41 +761,20 @@ def arm_system():
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data
 def create_placeholder(cam_name, status="STANDBY"):
-    """Tactical-style placeholder with reticle, grid, and corner brackets."""
+    """Clean, matte 16:9 box with subtle centered status text."""
     h, w = 360, 640
-    img = np.zeros((h, w, 3), dtype=np.uint8) + 11
+    # Matte dark surface #0C0C0E (BGR: 14, 12, 12)
+    img = np.full((h, w, 3), (14, 12, 12), dtype=np.uint8)
 
-    # Grid lines
-    for x in range(0, w, 64):
-        cv2.line(img, (x, 0), (x, h), (20, 33, 44), 1)
-    for y in range(0, h, 64):
-        cv2.line(img, (0, y), (w, y), (20, 33, 44), 1)
-
-    # Reticle
+    # Subtle centered text in muted zinc #71717A (BGR: 122, 113, 113)
     cx, cy = w // 2, h // 2
-    cv2.line(img, (cx - 50, cy), (cx - 14, cy), (31, 56, 72), 1)
-    cv2.line(img, (cx + 14, cy), (cx + 50, cy), (31, 56, 72), 1)
-    cv2.line(img, (cx, cy - 40), (cx, cy - 14), (31, 56, 72), 1)
-    cv2.line(img, (cx, cy + 14), (cx, cy + 40), (31, 56, 72), 1)
-    cv2.circle(img, (cx, cy), 20, (31, 56, 72), 1)
-    cv2.circle(img, (cx, cy), 55, (22, 40, 55), 1)
-    cv2.circle(img, (cx, cy), 3,  (35, 60, 80), -1)
-
-    # Corner brackets
-    bs = 20
-    corners = [(40, 30, 1, 1), (w - 40, 30, -1, 1),
-               (40, h - 30, 1, -1), (w - 40, h - 30, -1, -1)]
-    for bx, by, dx, dy in corners:
-        cv2.line(img, (bx, by), (bx + bs * dx, by), (60, 200, 232), 1)
-        cv2.line(img, (bx, by), (bx, by + bs * dy), (60, 200, 232), 1)
-
-    lw = cv2.getTextSize(cam_name, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)[0][0]
-    cv2.putText(img, cam_name, (cx - lw // 2, cy - 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (60, 200, 232), 1)
-    sw = cv2.getTextSize(f"[ {status} ]", cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)[0][0]
-    cv2.putText(img, f"[ {status} ]", (cx - sw // 2, cy + 76),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (45, 70, 90), 1)
-
+    text = f"{cam_name} · {status}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.52
+    thickness = 1
+    (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+    cv2.putText(img, text, (cx - tw // 2, cy + th // 2),
+                font, scale, (122, 113, 113), thickness, cv2.LINE_AA)
     return img
 
 # ---------------------------------------------------------
@@ -792,8 +1071,8 @@ class CameraWorker:
                         # CCTV Timestamp Overlay
                         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         cctv_text = f"REC · CAM 01 · {now_str}"
-                        cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (0, 0, 0), 4, cv2.LINE_AA)
-                        cv2.putText(annotated_rgb, cctv_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (60, 200, 232), 2, cv2.LINE_AA)
+                        cv2.putText(annotated_rgb, cctv_text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+                        cv2.putText(annotated_rgb, cctv_text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (250, 250, 250), 1, cv2.LINE_AA)
 
                         # Engine 2: Base model for crowd counting (imgsz=416, verbose=False)
                         base_results = self.base_model(frame, imgsz=416, verbose=False)
@@ -824,95 +1103,67 @@ class CameraWorker:
             self.cap = None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SIDEBAR — Control Panel
+# SIDEBAR — Enterprise Control Console
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown('<div class="sb-title">⬡ Control Panel</div>', unsafe_allow_html=True)
-
-    # ── TELEMETRY CHANNEL & HARDWARE REGISTRY ──
-    st.markdown('<div class="sb-lbl">▸ Telemetry Channel</div>', unsafe_allow_html=True)
-    feed_mode = st.radio(
-        "Telemetry Channel",
-        ["📡 Paired CCTV Network (Auto-Sync)", "🎬 Tactical Demo Simulation"],
-        index=0,
-        label_visibility="collapsed"
-    )
-
+    # ── STRONG TOP BRANDING ──
     armed_now = st.session_state.system_armed
-    if feed_mode == "🎬 Tactical Demo Simulation":
-        ip_url = "assets/demo_feed.mp4"
-        st.markdown(
-            '<div style="font-family:var(--mono);font-size:11px;color:var(--acc);'
-            'padding:6px 10px;background:var(--s2);border:1px solid var(--line2);border-radius:3px;margin-bottom:8px;">'
-            '🎬 TACTICAL DEMO ACTIVE (Simulation)</div>',
-            unsafe_allow_html=True
-        )
-    else:
-        if armed_now:
-            # 1-Click Auto-IP Healing via Dynamic Registry
-            resolved_url = resolve_paired_camera("CAM 01")
-            if resolved_url:
-                st.session_state.paired_camera_url = resolved_url
-                ip_url = resolved_url
-                st.markdown(
-                    '<div style="font-family:var(--mono);font-size:11px;color:var(--ok);'
-                    'padding:6px 10px;background:rgba(61,214,140,0.08);border:1px solid var(--ok);border-radius:3px;margin-bottom:8px;">'
-                    '🟢 CAM 01 ONLINE (Auto-Synced)</div>',
-                    unsafe_allow_html=True
-                )
-            else:
-                ip_url = "assets/demo_feed.mp4"
-                st.markdown(
-                    '<div style="font-family:var(--mono);font-size:11px;color:var(--warn);'
-                    'padding:6px 10px;background:rgba(242,179,61,0.08);border:1px solid var(--warn);border-radius:3px;margin-bottom:8px;">'
-                    '🟡 CAM 01 AUTO-HEAL: SCANNING (Demo Mode)</div>',
-                    unsafe_allow_html=True
-                )
-        else:
-            ip_url = "assets/demo_feed.mp4"
-            cam_info = get_paired_camera("CAM 01")
-            last_ip = cam_info.get("last_ip_port") if (cam_info and cam_info.get("last_ip_port")) else "Unpaired"
-            st.markdown(
-                f'<div style="font-family:var(--mono);font-size:11px;color:var(--mute);'
-                f'padding:6px 10px;background:var(--s2);border:1px solid var(--line2);border-radius:3px;margin-bottom:8px;">'
-                f'⚪ CAM 01 STANDBY ({last_ip})</div>',
-                unsafe_allow_html=True
-            )
+    focal_color = "#10B981" if armed_now else "#71717A"
 
-    # ── 2-STEP CAMERA CONNECTION FLOW (CAM 01) ──
-    st.markdown('<div class="sb-lbl">▸ CAM 01 Stream Connection</div>', unsafe_allow_html=True)
-    cam_info = get_paired_camera("CAM 01")
-    current_saved_url = ""
-    if cam_info:
-        current_saved_url = cam_info.get("stream_url") or cam_info.get("last_ip_port") or ""
-        if current_saved_url and not current_saved_url.startswith(("http://", "https://")):
-            current_saved_url = f"http://{current_saved_url}"
+    st.markdown(f"""
+    <div class="sb-brand">
+      <div class="sb-badge">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="12" cy="12" r="8.5" stroke="#FAFAFA" stroke-width="1.4"/>
+          <circle cx="12" cy="12" r="5" stroke="#FAFAFA" stroke-width="1.2" stroke-opacity="0.6"/>
+          <path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22" stroke="#FAFAFA" stroke-width="1.4" stroke-linecap="round"/>
+          <circle cx="12" cy="12" r="1.5" fill="{focal_color}"/>
+        </svg>
+      </div>
+      <div class="sb-brand-text">
+        <div class="sb-title-row">
+          <span class="sb-title">
+            <span class="word-hazard">Hazard</span><span class="word-lens">Lens</span>
+          </span>
+          <span class="sb-nvr-badge">NVR</span>
+        </div>
+        <div class="sb-subtitle">THREAT DETECTION CONSOLE</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
+    # ── CAMERA STREAM INPUT (EMPTY DEFAULT, NOT PRE-FILLED) ──
     stream_url_input = st.text_input(
-        "Camera Stream URL (Local IP or Cloudflare Tunnel)",
-        value=current_saved_url,
-        placeholder="http://192.168.1.3:8080 or https://xxx.trycloudflare.com",
-        help="Paste local IP Webcam URL or Cloudflare Tunnel endpoint",
+        "CAM 01 Stream URL",
+        value="",
+        placeholder="http://192.168.1.3:8080 or tunnel URL",
         key="cam_stream_url_input"
     )
 
-    btn_connect_arm = st.button("🔴 Connect & ARM", width="stretch", key="btn_connect_arm")
-
-    if btn_connect_arm:
-        trimmed_input = stream_url_input.strip()
-        if not trimmed_input:
-            st.error("Please enter a valid Camera Stream URL.")
-        else:
-            is_valid, validated_or_err = validate_stream_url(trimmed_input)
-            if not is_valid:
-                st.error(f"Invalid URL: {validated_or_err}")
+    # ── SINGLE TOGGLE CONTROL BUTTON ──
+    if not armed_now:
+        if st.button("ARM SYSTEM", type="primary", width="stretch", key="btn_arm_system"):
+            trimmed_input = stream_url_input.strip()
+            target_url = None
+            if trimmed_input:
+                is_valid, validated_or_err = validate_stream_url(trimmed_input)
+                if not is_valid:
+                    st.error(f"Invalid URL: {validated_or_err}")
+                else:
+                    target_url = normalize_camera_url(validated_or_err)
+                    save_camera_slot("CAM 01", target_url)
             else:
-                normalized_url = normalize_camera_url(validated_or_err)
-                save_camera_slot("CAM 01", normalized_url)
-                st.session_state.paired_camera_url = normalized_url
+                # Fall back to saved valid URL in paired_cameras.json
+                saved_url = resolve_paired_camera("CAM 01")
+                if saved_url:
+                    target_url = saved_url
+                else:
+                    target_url = "assets/demo_feed.mp4"
+
+            if target_url:
+                st.session_state.paired_camera_url = target_url
                 st.session_state.system_armed = True
 
-                # Immediately start CameraWorker with the new normalized URL
                 old_worker = st.session_state.get('camera_worker')
                 if old_worker is not None:
                     try:
@@ -922,7 +1173,7 @@ with st.sidebar:
                     st.session_state.camera_worker = None
 
                 new_worker = CameraWorker(
-                    ip_url=normalized_url,
+                    ip_url=target_url,
                     fire_mod=fire_model,
                     base_mod=base_model,
                     fire_conf=FIRE_CONF_THRESHOLD,
@@ -932,97 +1183,79 @@ with st.sidebar:
                 st.session_state.camera_worker = new_worker
                 new_worker.start()
 
-                st.toast("✅ CAM 01 Connected & System Armed!")
+                st.toast("System Armed · Monitoring Active")
                 st.rerun()
+    else:
+        if st.button("DISARM SYSTEM", width="stretch", key="btn_disarm_system"):
+            disarm_system()
+            st.toast("System Disarmed · Standby Mode")
+            st.rerun()
 
-    # ── SYSTEM CONTROL (1-CLICK TOGGLE) ──
-    st.markdown('<div class="sb-lbl">▸ System Control</div>', unsafe_allow_html=True)
-    ca, cb = st.columns(2)
-    with ca:
-        st.button("🔴 ARM",    on_click=arm_system,    width="stretch")
-    with cb:
-        st.button("⬛ DISARM", on_click=disarm_system, width="stretch")
-
-    st.markdown('<div class="sb-lbl">▸ Camera Status</div>', unsafe_allow_html=True)
-    cam_registry = [
-        ("CAM 01", "MIET COLLEGE MAIN GATE",   True),
-        ("CAM 02", "RAILWAY STATION ENTRANCE",  False),
-        ("CAM 03", "METRO STATION ENTRANCE",    False),
-        ("CAM 04", "SERVER ROOM BACKEND",       False),
-    ]
-    for cn, loc, active in cam_registry:
-        is_live  = active and armed_now
-        s_text   = "LIVE"  if is_live else "STDBY"
-        s_color  = "var(--ok)" if is_live else "var(--mute)"
-        dot_cls  = "dot dot-r" if is_live else "dot dot-a"
-        st.markdown(f"""
-        <div class="sb-row">
-          <div>
-            <div class="sb-rn">{cn}</div>
-            <div class="sb-rloc">{loc}</div>
-          </div>
-          <span class="sb-rs" style="color:{s_color};">
-            <span class="{dot_cls}" style="width:7px;height:7px;margin-right:4px;"></span>{s_text}
-          </span>
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="sb-lbl">▸ System Info</div>', unsafe_allow_html=True)
+    # ── TELEMETRY & ESSENTIAL SETTINGS ──
     st.markdown(f"""
-    <div class="sysinfo">
-    LOCATION &nbsp;&nbsp; : MIET CAMPUS<br>
-    PAIRING &nbsp;&nbsp;&nbsp; : AUTO (CRYPTOGRAPHIC)<br>
-    AUTH &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : MUTUAL BASIC-AUTH<br>
-    INTEGRITY &nbsp; : SHA-256 VERIFIED<br>
-    AI ENGINES : TWIN (FIRE + CROWD)<br>
-    TTS ENGINE : EDGE-TTS (HINDI NEURAL)<br>
-    LANGUAGE &nbsp;&nbsp; : HI-IN<br>
-    FRAME SKIP : {FRAME_SKIP} FRAMES<br>
-    CROWD LIM &nbsp;: {CROWD_THRESHOLD} PERSONS<br>
-    CONF THRESH: {FIRE_CONF_THRESHOLD}<br>
-    COOLDOWN &nbsp;&nbsp;: {EMAIL_COOLDOWN_SEC}s<br>
-    SILENCE &nbsp;&nbsp;&nbsp;: {SILENCE_DURATION_SEC}s
-    </div>""", unsafe_allow_html=True)
+    <div class="sb-divider"></div>
+    <div class="sb-section-title">Telemetry & Settings</div>
+    <div class="sb-settings-grid">
+      <div class="sb-setting-row">
+        <span class="sb-setting-label">Crowd Limit</span>
+        <span class="sb-setting-val">{CROWD_THRESHOLD} pers.</span>
+      </div>
+      <div class="sb-setting-row">
+        <span class="sb-setting-label">Inference Model</span>
+        <span class="sb-setting-val">Twin YOLOv8</span>
+      </div>
+      <div class="sb-setting-row">
+        <span class="sb-setting-label">Voice Synthesis</span>
+        <span class="sb-setting-val">Edge-TTS (HI-IN)</span>
+      </div>
+      <div class="sb-setting-row">
+        <span class="sb-setting-label">Alert Cooldown</span>
+        <span class="sb-setting-val">{EMAIL_COOLDOWN_SEC}s</span>
+      </div>
+      <div class="sb-setting-row">
+        <span class="sb-setting-label">Silence Duration</span>
+        <span class="sb-setting-val">{SILENCE_DURATION_SEC}s</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MASTER HEADER
+# RESOLVE ACTIVE CAMERA FEED
 # ─────────────────────────────────────────────────────────────────────────────
 armed = st.session_state.system_armed
-arm_cls = "arm-on"  if armed else "arm-off"
-dot_cls = "dot dot-g" if armed else "dot dot-a"
-arm_txt = "ARMED"   if armed else "STANDBY"
+if armed:
+    ip_url = st.session_state.get('paired_camera_url') or resolve_paired_camera("CAM 01") or "assets/demo_feed.mp4"
+else:
+    ip_url = "assets/demo_feed.mp4"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SLIM HEADER BAR
+# ─────────────────────────────────────────────────────────────────────────────
+worker_obj = st.session_state.get('camera_worker')
+has_active_feed = (armed and worker_obj is not None and getattr(worker_obj, 'latest_frame', None) is not None)
+active_cams = "1" if has_active_feed else "0"
+status_pill_cls = "status-armed" if armed else "status-standby"
+dot_cls = "dot-emerald" if armed else "dot-amber"
+status_txt = "ARMED" if armed else "STANDBY"
 
 st.markdown(f"""
-<div class="hz-hdr">
-  <div class="hz-brand">
-    <svg class="hz-logo" width="28" height="28" viewBox="0 0 24 24" fill="none"
-         stroke="#3CC8E8" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
-      <path d="M12 2.5 20.5 7.25v9.5L12 21.5l-8.5-4.75v-9.5z"/>
-      <circle cx="12" cy="12" r="3.2"/>
-    </svg>
-    <div>
-      <div class="hz-name">Hazard<em>Lens</em></div>
-      <div class="hz-sub">AI-Powered Smart City Surveillance Command · MIET Campus</div>
-    </div>
+<div class="hz-header-bar">
+  <div class="hz-header-left">
+    <span class="hz-title">Live Monitoring</span>
+    <span class="hz-loc-tag">MIET Campus</span>
   </div>
-  <div class="hz-right">
-    <div class="stat-pill">
-      <span class="stat-v">04</span>
-      <span class="stat-l">Cameras</span>
+  <div class="hz-header-right">
+    <div class="pill">
+      <span class="pill-label">Active</span>
+      <span class="pill-val">{active_cams}/4</span>
     </div>
-    <div class="stat-pill">
-      <span class="stat-v">{CROWD_THRESHOLD}</span>
-      <span class="stat-l">Crowd Lim</span>
+    <div class="pill">
+      <span class="pill-label">Crowd Limit</span>
+      <span class="pill-val">{CROWD_THRESHOLD}</span>
     </div>
-    <div class="stat-pill">
-      <span class="stat-v" style="font-size:13px;color:var(--ok);">AUTO</span>
-      <span class="stat-l">Pairing</span>
-    </div>
-    <div class="stat-pill">
-      <span class="stat-v" style="font-size:13px;color:var(--ok);">OP</span>
-      <span class="stat-l">Access</span>
-    </div>
-    <div class="{arm_cls}">
-      <span class="{dot_cls}"></span>{arm_txt}
+    <div class="status-pill {status_pill_cls}">
+      <span class="dot {dot_cls}"></span>
+      <span>{status_txt}</span>
     </div>
   </div>
 </div>
@@ -1043,40 +1276,38 @@ def render_alert_banner():
 
     if active_alert == "FIRE":
         st.markdown("""
-        <div class="a-fire">
-          <div class="a-ico-wrap">
-            <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="1.8"
-                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <div class="a-banner a-fire">
+          <div class="a-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6
                        .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0
                        c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
             </svg>
           </div>
-          <div>
-            <div class="a-kicker">FIRE · SMOKE HAZARD</div>
-            <div class="a-ttl">Fire / Smoke Detected — CAM 01</div>
-            <div class="a-msg">MIET Main Gate · High-confidence AI detection · Fire Safety Team Dispatched</div>
+          <div class="a-content">
+            <div class="a-kicker">Hazard Alert</div>
+            <div class="a-ttl">Fire / Smoke Detected on CAM 01</div>
+            <div class="a-msg">MIET College Main Gate · High-confidence AI detection · Automated dispatch active</div>
           </div>
         </div>""", unsafe_allow_html=True)
     elif active_alert == "CROWD":
         live_count = st.session_state.get("live_crowd_count", 0)
         st.markdown(f"""
-        <div class="a-crwd">
-          <div class="a-ico-wrap">
-            <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="1.8"
-                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <div class="a-banner a-crwd">
+          <div class="a-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
               <circle cx="9" cy="7" r="4"/>
               <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
               <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
             </svg>
           </div>
-          <div>
-            <div class="a-kicker">OVERCROWDING ALERT</div>
-            <div class="a-ttl">Crowd Limit Exceeded — CAM 01</div>
-            <div class="a-msg">MIET Main Gate · Live Count: {live_count} persons · Security Team Dispatch Triggered</div>
+          <div class="a-content">
+            <div class="a-kicker">Occupancy Advisory</div>
+            <div class="a-ttl">Crowd Limit Exceeded on CAM 01</div>
+            <div class="a-msg">MIET College Main Gate · Live Count: {live_count} persons (Threshold: {CROWD_THRESHOLD})</div>
           </div>
         </div>""", unsafe_allow_html=True)
 
@@ -1090,25 +1321,22 @@ else:
     render_alert_banner()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CAMERA GRID (STATIC CAMERAS RENDER ONCE, ONLY CAM 01 IS FRAGMENT-SCOPED)
+# CAMERA GRID (2x2 ENTERPRISE NVR LAYOUT)
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="sec-lbl">Active Monitoring Grid</div>', unsafe_allow_html=True)
-
-armed = st.session_state.system_armed
-live_badge  = '<span class="badge-live"><span class="dot dot-r" style="width:7px;height:7px;"></span>LIVE</span>'
-stdby_badge = '<span class="badge-stdby">NO SIGNAL</span>'
+live_badge    = '<span class="badge-status badge-live"><span class="dot dot-emerald"></span>LIVE</span>'
+warn_badge    = '<span class="badge-status badge-warn"><span class="dot dot-amber"></span>CONNECTING</span>'
+offline_badge = '<span class="badge-status badge-offline"><span class="dot dot-muted"></span>OFFLINE</span>'
 
 def render_cam_01_feed(stream_url):
-    """Dynamic feed, metric strip, silence button, and hazard detection for CAM 01."""
+    """Dynamic feed, card top bar, contextual silence, and hazard detection for CAM 01."""
     if st.session_state.pop("silence_toast_pending", False):
-        st.toast(f"🔕 CAM 01 alerts silenced for {SILENCE_DURATION_SEC}s.")
+        st.toast(f"CAM 01 alerts silenced for {SILENCE_DURATION_SEC}s.")
 
     armed = st.session_state.get("system_armed", False)
-
     now = time.time()
     is_silenced = (now < st.session_state.get('silenced_until', 0.0))
 
-    # When disarmed, ALWAYS render metric strip and standby placeholder before returning
+    # When disarmed, ensure worker stopped and render clean standby state
     if not armed:
         if st.session_state.get('camera_worker') is not None:
             try:
@@ -1123,14 +1351,18 @@ def render_cam_01_feed(stream_url):
         st.session_state.audio_expire_ts = 0.0
         play_persistent_audio(None, 0)
 
-        st.markdown(
-            '<div class="mstrip"><span class="ml">Crowd Count</span>'
-            '<span class="mv off">—</span></div>',
-            unsafe_allow_html=True
-        )
+        st.markdown(f"""
+        <div class="cam-card-hdr">
+          <div class="cam-card-meta">
+            <span class="cam-id">CAM 01</span>
+            <span class="cam-name">MIET College Main Gate</span>
+          </div>
+          <div class="cam-card-right">
+            <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+            {offline_badge}
+          </div>
+        </div>""", unsafe_allow_html=True)
         st.image(create_placeholder("CAM 01", "STANDBY"), width="stretch")
-        st.button("🔕 Silence CAM 01", key="silence_1",
-                  on_click=silence_alerts, width="stretch")
         return
 
     # When armed, ensure background worker is running for stream_url
@@ -1160,29 +1392,32 @@ def render_cam_01_feed(stream_url):
 
     st.session_state.live_crowd_count = person_count
 
+    has_feed = (frame is not None)
+    badge1 = live_badge if has_feed else warn_badge
+    crowd_str = f"{person_count} / {CROWD_THRESHOLD}"
+
+    st.markdown(f"""
+    <div class="cam-card-hdr">
+      <div class="cam-card-meta">
+        <span class="cam-id">CAM 01</span>
+        <span class="cam-name">MIET College Main Gate</span>
+      </div>
+      <div class="cam-card-right">
+        <span class="cam-crowd-count">{crowd_str}</span>
+        {badge1}
+      </div>
+    </div>""", unsafe_allow_html=True)
+
     if frame is not None:
-        st.markdown(
-            f'<div class="mstrip"><span class="ml">Crowd Count</span>'
-            f'<span class="mv">👥 {person_count}</span></div>',
-            unsafe_allow_html=True
-        )
         st.image(frame, channels="RGB", width="stretch")
     else:
-        st.markdown(
-            '<div class="mstrip"><span class="ml">Crowd Count</span>'
-            '<span class="mv off">—</span></div>',
-            unsafe_allow_html=True
-        )
-        st.image(create_placeholder("CAM 01", "CONNECTING..."), width="stretch")
+        st.image(create_placeholder("CAM 01", "CONNECTING"), width="stretch")
         if str(stream_url).startswith("http"):
             st.markdown(
-                f'<div style="font-family:var(--mono);font-size:11px;color:var(--warn);text-align:center;padding:4px 0;">'
-                f'🟡 AWAITING FEED ({stream_url}) &middot; Ensure "Start server" is active in IP Webcam on phone</div>',
+                f'<div style="font-family:var(--mono);font-size:11px;color:var(--amber);text-align:center;padding:6px 0;">'
+                f'Awaiting feed ({stream_url}) &middot; Ensure camera server is running</div>',
                 unsafe_allow_html=True
             )
-
-    st.button("🔕 Silence CAM 01", key="silence_1",
-              on_click=silence_alerts, width="stretch")
 
     # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins" + Silence Cooldown + Debounced Clearing) ──
     if is_silenced:
@@ -1199,42 +1434,39 @@ def render_cam_01_feed(stream_url):
                 st.session_state.hazard_clear_ts = None
         else:
             st.session_state.hazard_clear_ts = None
-        return
-
-    if fire_spotted:
-        st.session_state.hazard_clear_ts = None
-        prev_alert = st.session_state.get("active_alert")
-        if prev_alert != "FIRE":
-            last_audio = st.session_state.last_audio_ts.get("FIRE", 0.0)
-            if now - last_audio > AUDIO_COOLDOWN_SEC:
-                trigger_hindi_alert(FIRE_TTS_TEXT)
-                st.session_state.last_audio_ts["FIRE"] = now
-            email_alerter.send_alert("FIRE")
-
-        st.session_state.active_alert = "FIRE"
-
-    elif person_count > CROWD_THRESHOLD:
-        st.session_state.hazard_clear_ts = None
-        prev_alert = st.session_state.get("active_alert")
-        if prev_alert != "CROWD":
-            last_audio = st.session_state.last_audio_ts.get("CROWD", 0.0)
-            if now - last_audio > AUDIO_COOLDOWN_SEC:
-                trigger_hindi_alert(CROWD_TTS_TEXT)
-                st.session_state.last_audio_ts["CROWD"] = now
-            email_alerter.send_alert("CROWD", person_count)
-
-        st.session_state.active_alert = "CROWD"
-
     else:
-        # Reset alert display if hazards have cleared (debounced with grace period to prevent flickering)
-        if st.session_state.get("active_alert") is not None:
-            if st.session_state.hazard_clear_ts is None:
-                st.session_state.hazard_clear_ts = now
-            elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
-                st.session_state.active_alert = None
-                st.session_state.hazard_clear_ts = None
+        if fire_spotted:
+            st.session_state.hazard_clear_ts = None
+            prev_alert = st.session_state.get("active_alert")
+            if prev_alert != "FIRE":
+                last_audio = st.session_state.last_audio_ts.get("FIRE", 0.0)
+                if now - last_audio > AUDIO_COOLDOWN_SEC:
+                    trigger_hindi_alert(FIRE_TTS_TEXT)
+                    st.session_state.last_audio_ts["FIRE"] = now
+                email_alerter.send_alert("FIRE")
+            st.session_state.active_alert = "FIRE"
 
-    # Persistent Parent-Window Web Audio Playback (Loops infinitely until Silence/Disarm)
+        elif person_count > CROWD_THRESHOLD:
+            st.session_state.hazard_clear_ts = None
+            prev_alert = st.session_state.get("active_alert")
+            if prev_alert != "CROWD":
+                last_audio = st.session_state.last_audio_ts.get("CROWD", 0.0)
+                if now - last_audio > AUDIO_COOLDOWN_SEC:
+                    trigger_hindi_alert(CROWD_TTS_TEXT)
+                    st.session_state.last_audio_ts["CROWD"] = now
+                email_alerter.send_alert("CROWD", person_count)
+            st.session_state.active_alert = "CROWD"
+
+        else:
+            # Reset alert display if hazards have cleared (debounced with grace period to prevent flickering)
+            if st.session_state.get("active_alert") is not None:
+                if st.session_state.hazard_clear_ts is None:
+                    st.session_state.hazard_clear_ts = now
+                elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
+                    st.session_state.active_alert = None
+                    st.session_state.hazard_clear_ts = None
+
+    # Persistent Web Audio Playback (Loops infinitely until Silence/Disarm)
     active_b64 = st.session_state.get('active_audio_b64')
     active_id = st.session_state.get('active_audio_id', 0)
 
@@ -1245,25 +1477,13 @@ def render_cam_01_feed(stream_url):
             st.session_state.active_audio_b64 = None
             play_persistent_audio(None, 0)
 
+    # Contextual Silence Button: Only rendered when an alert is actively ringing on CAM 01
+    if armed and not is_silenced and st.session_state.get("active_alert") is not None:
+        st.button("Silence Alert", key="silence_1", on_click=silence_alerts, width="stretch")
+
 col1, col2 = st.columns(2)
 
 with col1:
-    worker_obj = st.session_state.get('camera_worker')
-    has_active_feed = (armed and worker_obj is not None and getattr(worker_obj, 'latest_frame', None) is not None)
-    hdr_cls = "cam-hdr live" if has_active_feed else "cam-hdr"
-    if armed:
-        badge1 = live_badge if has_active_feed else '<span class="badge-live" style="background:#F2B33D;color:#0B0F14;">CONNECTING</span>'
-    else:
-        badge1 = stdby_badge
-    st.markdown(f"""
-    <div class="{hdr_cls}">
-      <div>
-        <div class="cam-nm">CAM 01</div>
-        <div class="cam-loc">MIET College Main Gate</div>
-      </div>
-      {badge1}
-    </div>""", unsafe_allow_html=True)
-
     if hasattr(st, "fragment"):
         @st.fragment(run_every=0.5)
         def cam_01_live_fragment(stream_url):
@@ -1278,66 +1498,56 @@ with col1:
 
 with col2:
     st.markdown(f"""
-    <div class="cam-hdr">
-      <div>
-        <div class="cam-nm">CAM 02</div>
-        <div class="cam-loc">Railway Station Entrance</div>
+    <div class="cam-card-hdr">
+      <div class="cam-card-meta">
+        <span class="cam-id">CAM 02</span>
+        <span class="cam-name">Railway Station Entrance</span>
       </div>
-      {stdby_badge}
+      <div class="cam-card-right">
+        <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+        {offline_badge}
+      </div>
     </div>""", unsafe_allow_html=True)
-    st.markdown(
-        '<div class="mstrip"><span class="ml">Crowd Count</span>'
-        '<span class="mv off">—</span></div>', unsafe_allow_html=True)
-    st.image(create_placeholder("CAM 02"), width="stretch")
-    st.button("🔕 Silence CAM 02", key="silence_2",
-              on_click=dummy_silence, args=("CAM 02",), width="stretch")
+    st.image(create_placeholder("CAM 02", "STANDBY"), width="stretch")
 
 col3, col4 = st.columns(2)
 
 with col3:
     st.markdown(f"""
-    <div class="cam-hdr">
-      <div>
-        <div class="cam-nm">CAM 03</div>
-        <div class="cam-loc">Metro Station Entrance</div>
+    <div class="cam-card-hdr">
+      <div class="cam-card-meta">
+        <span class="cam-id">CAM 03</span>
+        <span class="cam-name">Metro Station Entrance</span>
       </div>
-      {stdby_badge}
+      <div class="cam-card-right">
+        <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+        {offline_badge}
+      </div>
     </div>""", unsafe_allow_html=True)
-    st.markdown(
-        '<div class="mstrip"><span class="ml">Crowd Count</span>'
-        '<span class="mv off">—</span></div>', unsafe_allow_html=True)
-    st.image(create_placeholder("CAM 03"), width="stretch")
-    st.button("🔕 Silence CAM 03", key="silence_3",
-              on_click=dummy_silence, args=("CAM 03",), width="stretch")
+    st.image(create_placeholder("CAM 03", "STANDBY"), width="stretch")
 
 with col4:
     st.markdown(f"""
-    <div class="cam-hdr">
-      <div>
-        <div class="cam-nm">CAM 04</div>
-        <div class="cam-loc">Server Room Backend</div>
+    <div class="cam-card-hdr">
+      <div class="cam-card-meta">
+        <span class="cam-id">CAM 04</span>
+        <span class="cam-name">Server Room Backend</span>
       </div>
-      {stdby_badge}
+      <div class="cam-card-right">
+        <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+        {offline_badge}
+      </div>
     </div>""", unsafe_allow_html=True)
-    st.markdown(
-        '<div class="mstrip"><span class="ml">Crowd Count</span>'
-        '<span class="mv off">—</span></div>', unsafe_allow_html=True)
-    st.image(create_placeholder("CAM 04"), width="stretch")
-    st.button("🔕 Silence CAM 04", key="silence_4",
-              on_click=dummy_silence, args=("CAM 04",), width="stretch")
-
-if "dummy_silence_cam" in st.session_state and st.session_state.dummy_silence_cam:
-    _dcam = st.session_state.pop("dummy_silence_cam")
-    st.toast(f"ℹ️ {_dcam} is on STANDBY — no active alerts to silence.")
+    st.image(create_placeholder("CAM 04", "STANDBY"), width="stretch")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FOOTER STATUS BAR
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="ftr">
-  <span>⬡ HAZARDLENS COMMAND V2.0 · MIET CAMPUS, MEERUT</span>
-  <span>TWIN YOLOV8 · EDGE-TTS · RESEND</span>
-  <span><span class="online">●</span> ALL TIMES IST (UTC+05:30)</span>
+  <span>HAZARDLENS · MIET CAMPUS</span>
+  <span>YOLOV8 · EDGE-TTS · RESEND</span>
+  <span>ALL TIMES IST (UTC+05:30)</span>
   <span id="ftr-dt">—</span>
 </div>
 <script>
