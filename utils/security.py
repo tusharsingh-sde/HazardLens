@@ -246,19 +246,22 @@ def get_local_ip() -> str:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.2)
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
+        sock_ip = s.getsockname()[0]
         s.close()
-        if not ip.startswith("127."):
-            return ip
+        ip_str = str(sock_ip)
+        if not ip_str.startswith("127."):
+            return ip_str
     except Exception:
         pass
 
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = str(info[4][0])
-            if not ip.startswith("127."):
-                return ip
+            sockaddr = info[4]
+            if isinstance(sockaddr, tuple) and len(sockaddr) > 0:
+                ip_str = str(sockaddr[0])
+                if not ip_str.startswith("127."):
+                    return ip_str
     except Exception:
         pass
 
@@ -274,10 +277,11 @@ def get_all_local_ips() -> set[str]:
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None):
-            raw = str(info[4][0])
-            clean = clean_ip_address(raw)
-            if clean:
-                local_ips.add(clean)
+            sockaddr = info[4]
+            if isinstance(sockaddr, tuple) and len(sockaddr) > 0:
+                clean = clean_ip_address(str(sockaddr[0]))
+                if clean:
+                    local_ips.add(clean)
     except Exception:
         pass
     return local_ips
@@ -295,8 +299,9 @@ def get_local_subnets() -> list[str]:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.2)
         s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
+        sock_ip = s.getsockname()[0]
         s.close()
+        local_ip = str(sock_ip)
         if not local_ip.startswith("127."):
             net = ipaddress.ip_network(f"{local_ip}/24", strict=False)
             subnets.add(str(net))
@@ -307,10 +312,12 @@ def get_local_subnets() -> list[str]:
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = str(info[4][0])
-            if not ip.startswith("127."):
-                net = ipaddress.ip_network(f"{ip}/24", strict=False)
-                subnets.add(str(net))
+            sockaddr = info[4]
+            if isinstance(sockaddr, tuple) and len(sockaddr) > 0:
+                ip_str = str(sockaddr[0])
+                if not ip_str.startswith("127."):
+                    net = ipaddress.ip_network(f"{ip_str}/24", strict=False)
+                    subnets.add(str(net))
     except Exception:
         pass
 

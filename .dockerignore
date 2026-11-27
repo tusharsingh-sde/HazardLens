@@ -13,6 +13,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.yolo/
 
 # Tests & test caches
 tests/
@@ -20,11 +21,15 @@ tests/
 .coverage
 htmlcov/
 
-# Editor configurations & artifacts
+# Editor configurations & dev artifacts
 .vscode/
 .idea/
 *.swp
 *.bak
+scratch/
+pyproject.toml
+pyrefly.toml
+pyrightconfig.json
 
 # Documentation
 README.md
@@ -35,7 +40,6 @@ old_best.pt
 *.mp3
 
 # Ensure critical application assets are included
-!assets/demo_feed.mp4
 !best.pt
 !yolov8n.pt
 !.streamlit/config.toml

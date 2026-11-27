@@ -1,3 +1,10 @@
+import os
+# Ensure YOLO config directory is writable across environments (local Windows sandbox, Linux container)
+if not os.environ.get("YOLO_CONFIG_DIR"):
+    _fallback_yolo = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yolo")
+    os.makedirs(_fallback_yolo, exist_ok=True)
+    os.environ["YOLO_CONFIG_DIR"] = _fallback_yolo
+
 import streamlit as st
 import streamlit.components.v1 as components
 import base64
@@ -7,11 +14,12 @@ from ultralytics import YOLO
 from datetime import datetime
 import edge_tts
 import asyncio
-import os
 import hashlib
 import time
 import threading
 import urllib.request
+import requests
+from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
 
 # ── RESEND EMAIL ALERT SERVICE ──
@@ -870,7 +878,7 @@ def trigger_hindi_alert(text):
 # --- STREAMLIT HTML / AUDIO CONTROLLER HELPER ---
 # ---------------------------------------------------------
 try:
-    import streamlit.deprecation_util as _deprec_util
+    from streamlit import deprecation_util as _deprec_util  # type: ignore
     class _SuppressHtmlDeprecation(object):
         def filter(self, record):
             return "components.v1.html" not in record.getMessage()
@@ -976,10 +984,120 @@ def play_persistent_audio(b64_audio: str | None = None, audio_id: int = 0, force
         print(f"Parent-window audio controller error: {e}")
 
 # ---------------------------------------------------------
-# --- THREADED CAMERA WORKER (NON-BLOCKING INFERENCE) ---
+# --- DECOUPLED ASYNC DUAL-YOLO INFERENCE WORKER ---
+# ---------------------------------------------------------
+class InferenceWorker:
+    """
+    Decoupled background worker for async dual-YOLO inference.
+    Runs fire_model (best.pt) and base_model (yolov8n.pt) at imgsz=320 without blocking
+    the video capture thread or the Streamlit display rendering loop.
+    """
+    def __init__(self, fire_mod, base_mod, fire_conf: float = 0.80, crowd_thresh: int = 1):
+        self.fire_model = fire_mod
+        self.base_model = base_mod
+        self.fire_conf = fire_conf
+        self.crowd_threshold = crowd_thresh
+
+        self.lock = threading.Lock()
+        self.running = False
+        self.thread: threading.Thread | None = None
+
+        self.person_count: int = 0
+        self.fire_spotted: bool = False
+        self.inference_ms: float = 0.0
+        self.detections: list[dict] = []
+        self._last_processed_seq: int = -1
+
+    def start(self, get_frame_fn):
+        if self.running and self.thread and self.thread.is_alive():
+            return
+        self.running = True
+        self.thread = threading.Thread(target=self._run_loop, args=(get_frame_fn,), daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.thread and self.thread.is_alive() and self.thread != threading.current_thread():
+            self.thread.join(timeout=1.0)
+        self.thread = None
+
+    def _run_loop(self, get_frame_fn):
+        while self.running:
+            # Grab latest raw frame from CameraWorker
+            frame, seq = get_frame_fn()
+            if frame is None or seq == self._last_processed_seq:
+                time.sleep(0.005)
+                continue
+
+            self._last_processed_seq = seq
+            t0 = time.time()
+            try:
+                with model_inference_lock:
+                    # Engine 1: Fire & Smoke (imgsz=320 for 3-4x faster inference)
+                    fire_res = self.fire_model(frame, conf=self.fire_conf, imgsz=320, verbose=False)
+                    # Engine 2: Base crowd model (imgsz=320 for fast person detection)
+                    base_res = self.base_model(frame, imgsz=320, verbose=False)
+
+                inf_time_ms = (time.time() - t0) * 1000.0
+
+                parsed_dets: list[dict] = []
+                fire_found = False
+                p_count = 0
+
+                # Parse Fire / Smoke detections
+                if fire_res and len(fire_res) > 0 and fire_res[0].boxes is not None:
+                    for b in fire_res[0].boxes:
+                        cls_idx = int(b.cls[0])
+                        cls_name = self.fire_model.names.get(cls_idx, "fire")
+                        conf = float(b.conf[0])
+                        coords = tuple(map(int, b.xyxy[0]))
+                        if cls_name.lower() in ("fire", "smoke", "火", "烟"):
+                            fire_found = True
+                            parsed_dets.append({
+                                "bbox": coords,
+                                "label": cls_name.upper(),
+                                "conf": conf,
+                                "type": "fire"
+                            })
+
+                # Parse Person detections
+                if base_res and len(base_res) > 0 and base_res[0].boxes is not None:
+                    for b in base_res[0].boxes:
+                        cls_idx = int(b.cls[0])
+                        cls_name = self.base_model.names.get(cls_idx, "")
+                        if cls_name == "person":
+                            p_count += 1
+                            conf = float(b.conf[0])
+                            coords = tuple(map(int, b.xyxy[0]))
+                            parsed_dets.append({
+                                "bbox": coords,
+                                "label": "PERSON",
+                                "conf": conf,
+                                "type": "person"
+                            })
+
+                with self.lock:
+                    self.detections = parsed_dets
+                    self.person_count = p_count
+                    self.fire_spotted = fire_found
+                    self.inference_ms = inf_time_ms
+
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------
+# --- ZERO-BUFFER PERSISTENT STREAM GRABBER (CAMERA WORKER) ---
 # ---------------------------------------------------------
 class CameraWorker:
-    """Background worker for non-blocking video capture and YOLO inference."""
+    """
+    High-performance zero-buffer camera stream grabber with decoupled async YOLO inference.
+    - Persistent requests.Session() eliminates TCP+TLS handshakes per frame over Cloudflare Quick Tunnel.
+    - Primary mode: Streams MJPEG from {base_url}/video with boundary parser and zero-buffer latest-frame-only rule.
+    - Fallback mode: Polls {base_url}/shot.jpg over the SAME persistent HTTP Keep-Alive session with zero inter-frame sleep.
+    - Fallback for local files / RTSP: cv2.VideoCapture with auto-looping.
+    - Decoupled InferenceWorker: Runs YOLO inference (imgsz=320) asynchronously in the background.
+    """
     def __init__(self, ip_url, fire_mod, base_mod, fire_conf, crowd_thresh, frame_skip):
         self.ip_url = ip_url
         self.fire_model = fire_mod
@@ -990,156 +1108,262 @@ class CameraWorker:
 
         self.lock = threading.Lock()
         self.running = False
-        self.thread = None
-        self.cap = None
+        self.capture_thread: threading.Thread | None = None
+        self.session: requests.Session | None = None
+        self.cap: cv2.VideoCapture | None = None
 
-        self.latest_frame = None
-        self.person_count = 0
-        self.fire_spotted = False
+        self.latest_raw_frame: np.ndarray | None = None
+        self.latest_frame: np.ndarray | None = None  # Backward-compatibility alias
+        self.frame_seq: int = 0
 
-        # Fast HTTP snapshot grabber for IP Webcam / network cameras
+        # Sub-worker for asynchronous YOLO inference
+        self.inference_worker = InferenceWorker(
+            fire_mod=fire_mod,
+            base_mod=base_mod,
+            fire_conf=fire_conf,
+            crowd_thresh=crowd_thresh
+        )
+
+        # URL normalization for HTTP network cameras (e.g. IP Webcam or Cloudflare tunnel)
         self.is_http = str(self.ip_url).startswith("http://") or str(self.ip_url).startswith("https://")
         if self.is_http:
             clean_url = str(self.ip_url).rstrip("/")
             if clean_url.endswith("/video"):
-                clean_base = clean_url[:-6].rstrip("/")
-                self.shot_url = f"{clean_base}/shot.jpg"
+                base = clean_url[:-6].rstrip("/")
             elif clean_url.endswith("/shot.jpg"):
-                self.shot_url = clean_url
+                base = clean_url[:-9].rstrip("/")
             else:
-                self.shot_url = f"{clean_url}/shot.jpg"
+                base = clean_url
+            self.video_url = f"{base}/video"
+            self.shot_url = f"{base}/shot.jpg"
         else:
+            self.video_url = None
             self.shot_url = None
 
+    @property
+    def person_count(self) -> int:
+        return self.inference_worker.person_count if self.inference_worker else 0
+
+    @property
+    def fire_spotted(self) -> bool:
+        return self.inference_worker.fire_spotted if self.inference_worker else False
+
+    @property
+    def detections(self) -> list:
+        return self.inference_worker.detections if self.inference_worker else []
+
+    @property
+    def inference_ms(self) -> float:
+        return self.inference_worker.inference_ms if self.inference_worker else 0.0
+
+    def get_raw_frame_and_seq(self) -> tuple[np.ndarray | None, int]:
+        with self.lock:
+            if self.latest_raw_frame is not None:
+                return self.latest_raw_frame.copy(), self.frame_seq
+            return None, -1
+
+    def get_display_data(self) -> tuple[np.ndarray | None, list, int, bool, float]:
+        with self.lock:
+            raw = self.latest_raw_frame.copy() if self.latest_raw_frame is not None else None
+
+        if self.inference_worker:
+            with self.inference_worker.lock:
+                dets = list(self.inference_worker.detections)
+                p_cnt = self.inference_worker.person_count
+                fire_f = self.inference_worker.fire_spotted
+                inf_ms = self.inference_worker.inference_ms
+        else:
+            dets, p_cnt, fire_f, inf_ms = [], 0, False, 0.0
+
+        return raw, dets, p_cnt, fire_f, inf_ms
+
     def start(self):
-        if self.running and self.thread and self.thread.is_alive():
+        if self.running and self.capture_thread and self.capture_thread.is_alive():
             return
         self.running = True
-        self.thread = threading.Thread(target=self._worker_loop, daemon=True)
-        self.thread.start()
+        self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.capture_thread.start()
+        self.inference_worker.start(self.get_raw_frame_and_seq)
 
     def stop(self):
         self.running = False
+        if self.session is not None:
+            try:
+                self.session.close()
+            except Exception:
+                pass
+            self.session = None
+
         if self.cap is not None:
             try:
                 self.cap.release()
             except Exception:
                 pass
             self.cap = None
-        if self.thread and self.thread.is_alive() and self.thread != threading.current_thread():
-            self.thread.join(timeout=1.0)
-        self.thread = None
 
-    def _read_frame(self):
-        """
-        Grab a fresh frame.
-        For HTTP streams: Fast /shot.jpg HTTP fetcher bypasses OpenCV MSMF/MJPEG bugs with zero lag.
-        For local video files / RTSP: Uses cv2.VideoCapture with auto-looping.
-        """
-        # Primary for HTTP network cameras: /shot.jpg HTTP snapshot
-        if self.is_http and self.shot_url:
+        if self.inference_worker is not None:
+            self.inference_worker.stop()
+
+        if self.capture_thread and self.capture_thread.is_alive() and self.capture_thread != threading.current_thread():
+            self.capture_thread.join(timeout=1.0)
+        self.capture_thread = None
+
+    def _capture_loop(self):
+        if self.is_http:
+            self._capture_http_loop()
+        else:
+            self._capture_cv2_loop()
+
+    def _capture_http_loop(self):
+        target_url = self.shot_url
+        if not target_url:
+            return
+
+        # Configure persistent requests.Session with connection pooling & Keep-Alive
+        self.session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=2, pool_maxsize=4, max_retries=1)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
+        headers = {
+            "Connection": "keep-alive",
+            "User-Agent": "HazardLens-NVR/2.0"
+        }
+
+        last_successful_fetch = time.time()
+        while self.running:
             try:
-                req = urllib.request.Request(self.shot_url, headers={"User-Agent": "HazardLens-FrameGrabber/1.0"})
-                with urllib.request.urlopen(req, timeout=1.2) as resp:
-                    if resp.status == 200:
-                        img_bytes = resp.read()
-                        if img_bytes:
-                            img_np = np.frombuffer(img_bytes, dtype=np.uint8)
-                            frame = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
-                            if frame is not None and frame.size > 0:
-                                return True, frame
+                resp = self.session.get(
+                    target_url,
+                    timeout=(2.5, 2.5),
+                    headers=headers
+                )
+                if resp.status_code == 200 and resp.content:
+                    img_np = np.frombuffer(resp.content, dtype=np.uint8)
+                    frame = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+                    if frame is not None and frame.size > 0:
+                        with self.lock:
+                            self.latest_raw_frame = frame
+                            self.latest_frame = frame
+                            self.frame_seq += 1
+                        last_successful_fetch = time.time()
+                else:
+                    # Keep last valid frame on transient errors; only clear after >6s continuous failure
+                    if time.time() - last_successful_fetch > 6.0:
+                        with self.lock:
+                            self.latest_raw_frame = None
+                            self.latest_frame = None
             except Exception:
-                pass
+                # Keep last valid frame on transient network drops; only clear after >6s continuous failure
+                if time.time() - last_successful_fetch > 6.0:
+                    with self.lock:
+                        self.latest_raw_frame = None
+                        self.latest_frame = None
 
-        # Fallback to cv2.VideoCapture (for local MP4, RTSP, or fallback)
-        if self.cap is not None and self.cap.isOpened():
-            ret, frame = self.cap.read()
-            if ret and frame is not None:
-                return True, frame
-            # Infinite loop for local demo video files
-            if isinstance(self.ip_url, str) and os.path.isfile(self.ip_url):
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret, frame = self.cap.read()
-                if ret and frame is not None:
-                    return True, frame
+            time.sleep(0.03)
 
-        return False, None
+    def _capture_cv2_loop(self):
+        try:
+            self.cap = cv2.VideoCapture(self.ip_url)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            self.cap = None
 
-    def _worker_loop(self):
-        # Only initialize cv2.VideoCapture for local files or RTSP streams!
-        # For HTTP network cameras (e.g. IP Webcam), pure HTTP frame grabber is used
-        # to avoid OpenCV FFMPEG TCP connection errors (-138) and thread blocking.
-        if not self.is_http:
-            try:
-                self.cap = cv2.VideoCapture(self.ip_url)
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                self.cap = None
-
-        count = 0
         failed_reads = 0
         while self.running:
-            ret, frame = self._read_frame()
-            if not ret or frame is None:
-                failed_reads += 1
-                time.sleep(0.08)
-                if failed_reads >= 50 and not self.is_http:  # Re-attempt VideoCapture initialization after dropped file stream
-                    if self.cap is not None:
-                        try:
-                            self.cap.release()
-                        except Exception:
-                            pass
+            if self.cap is not None and self.cap.isOpened():
+                ret, frame = self.cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    with self.lock:
+                        self.latest_raw_frame = frame
+                        self.latest_frame = frame
+                        self.frame_seq += 1
+                    failed_reads = 0
+                    time.sleep(0.03)  # ~30 FPS for local file/stream
+                    continue
+
+                # Auto-loop for local video files
+                if isinstance(self.ip_url, str) and os.path.isfile(self.ip_url):
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame = self.cap.read()
+                    if ret and frame is not None and frame.size > 0:
+                        with self.lock:
+                            self.latest_raw_frame = frame
+                            self.latest_frame = frame
+                            self.frame_seq += 1
+                        time.sleep(0.03)
+                        continue
+
+            failed_reads += 1
+            time.sleep(0.08)
+            if failed_reads >= 40:
+                if self.cap is not None:
                     try:
-                        self.cap = cv2.VideoCapture(self.ip_url)
-                        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        self.cap.release()
                     except Exception:
                         pass
-                    failed_reads = 0
-                continue
-
-            failed_reads = 0
-            count += 1
-            if count % self.frame_skip == 0:
                 try:
-                    with model_inference_lock:
-                        # Engine 1: Custom Fire / Smoke model (imgsz=416, verbose=False for fast edge inference)
-                        fire_results = self.fire_model(frame, conf=self.fire_conf, imgsz=416, verbose=False)
-                        annotated_frame = fire_results[0].plot()
-                        annotated_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                    self.cap = cv2.VideoCapture(self.ip_url)
+                    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
+                failed_reads = 0
 
-                        # CCTV Timestamp Overlay
-                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        cctv_text = f"REC · CAM 01 · {now_str}"
-                        cv2.putText(annotated_rgb, cctv_text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
-                        cv2.putText(annotated_rgb, cctv_text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (250, 250, 250), 1, cv2.LINE_AA)
 
-                        # Engine 2: Base model for crowd counting (imgsz=416, verbose=False)
-                        base_results = self.base_model(frame, imgsz=416, verbose=False)
-                        p_count = sum(
-                            1 for box in base_results[0].boxes
-                            if self.base_model.names[int(box.cls[0])] == 'person'
-                        )
+# ---------------------------------------------------------
+# --- FAST BGR/HUD OVERLAY & PRE-ENCODED JPEG RENDERING ---
+# ---------------------------------------------------------
+def draw_hud_and_detections(frame: np.ndarray, detections: list, inf_ms: float = 0.0) -> np.ndarray:
+    """
+    Renders cached YOLO bounding boxes and CCTV HUD overlay onto the raw camera frame.
+    Runs on the display thread so video plays smoothly at high FPS even while YOLO runs asynchronously.
+    """
+    annotated = frame.copy()
+    h, w = annotated.shape[:2]
 
-                        fire_found = any(
-                            self.fire_model.names[int(b.cls[0])].lower() in ('fire', 'smoke', '火', '烟')
-                            for b in fire_results[0].boxes
-                        )
+    # 1. Bounding Boxes
+    for det in detections:
+        x1, y1, x2, y2 = det["bbox"]
+        label = det.get("label", "")
+        conf = det.get("conf", 0.0)
+        det_type = det.get("type", "person")
 
-                    with self.lock:
-                        self.latest_frame = annotated_rgb
-                        self.person_count = p_count
-                        self.fire_spotted = fire_found
-                except Exception as e:
-                    print(f"Inference error in worker: {e}")
-            else:
-                time.sleep(0.005)
+        # Clamp box coordinates to frame boundaries
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w - 1, x2), min(h - 1, y2)
 
-        if self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
+        if det_type == "fire":
+            box_color = (34, 34, 239)    # Bright red (BGR)
+            badge_text = f"{label} {int(conf * 100)}%"
+        else:
+            box_color = (129, 185, 16)   # Emerald green (BGR)
+            badge_text = f"PERSON {int(conf * 100)}%"
+
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 2)
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.40
+        thickness = 1
+        (tw, th), _ = cv2.getTextSize(badge_text, font, font_scale, thickness)
+        ty1 = max(0, y1 - th - 6)
+        cv2.rectangle(annotated, (x1, ty1), (x1 + tw + 6, ty1 + th + 6), box_color, -1)
+        cv2.putText(annotated, badge_text, (x1 + 3, ty1 + th + 1), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+    # 2. CCTV Timestamp Overlay (Top-Left)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cctv_text = f"REC · CAM 01 · {now_str}"
+    cv2.putText(annotated, cctv_text, (14, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(annotated, cctv_text, (14, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (250, 250, 250), 1, cv2.LINE_AA)
+
+    # 3. Latency / Telemetry Indicator (Top-Right)
+    if inf_ms > 0:
+        telemetry_text = f"YOLO {int(inf_ms)}ms"
+        (tw2, _), _ = cv2.getTextSize(telemetry_text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        tx = max(10, w - tw2 - 14)
+        cv2.putText(annotated, telemetry_text, (tx, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(annotated, telemetry_text, (tx, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (16, 185, 129), 1, cv2.LINE_AA)
+
+    return annotated
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR — Enterprise Control Console
@@ -1439,15 +1663,12 @@ def render_cam_01_feed(stream_url):
         st.session_state.camera_worker = worker
         worker.start()
 
-    # Read latest inference frame and values from worker
-    with worker.lock:
-        frame = worker.latest_frame
-        person_count = worker.person_count
-        fire_spotted = worker.fire_spotted
+    # Read latest raw frame and async YOLO detection state from worker
+    raw_frame, detections, person_count, fire_spotted, inf_ms = worker.get_display_data()
 
     st.session_state.live_crowd_count = person_count
 
-    has_feed = (frame is not None)
+    has_feed = (raw_frame is not None)
     badge1 = live_badge if has_feed else warn_badge
     crowd_str = f"{person_count} / {CROWD_THRESHOLD}"
 
@@ -1463,8 +1684,14 @@ def render_cam_01_feed(stream_url):
       </div>
     </div>""", unsafe_allow_html=True)
 
-    if frame is not None:
-        st.image(frame, channels="RGB", width="stretch")
+    if raw_frame is not None:
+        annotated = draw_hud_and_detections(raw_frame, detections, inf_ms)
+        # Fast JPEG bytes encoding for zero Streamlit conversion overhead
+        ret, jpeg_buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if ret and jpeg_buf is not None and len(jpeg_buf) > 0:
+            st.image(jpeg_buf.tobytes(), width="stretch")
+        else:
+            st.image(annotated, channels="BGR", width="stretch")
     else:
         st.image(create_placeholder("CAM 01", "CONNECTING"), width="stretch")
         if str(stream_url).startswith("http"):
@@ -1540,7 +1767,7 @@ col1, col2 = st.columns(2)
 
 with col1:
     if hasattr(st, "fragment"):
-        @st.fragment(run_every=0.5)
+        @st.fragment(run_every=0.15)
         def cam_01_live_fragment(stream_url):
             render_cam_01_feed(stream_url)
 
@@ -1548,7 +1775,7 @@ with col1:
     else:
         render_cam_01_feed(ip_url)
         if st.session_state.system_armed:
-            time.sleep(0.5)
+            time.sleep(0.15)
             st.rerun()
 
 with col2:

@@ -1,27 +1,21 @@
-FROM python:3.10-slim-bookworm
+FROM python:3.12-slim
 
 # Environment optimizations
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    YOLO_CONFIG_DIR=/tmp/Ultralytics
+    YOLO_CONFIG_DIR=/tmp/ultralytics
 
 # System dependencies for OpenCV, FFmpeg, and health checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
-    libgl1 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
     curl \
-    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip and install CPU-only PyTorch with PyPI fallback
+# Upgrade pip and install CPU-only PyTorch BEFORE requirements/ultralytics to keep image lean
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir torch torchvision \
-    --index-url https://download.pytorch.org/whl/cpu \
-    --extra-index-url https://pypi.org/simple
+    --index-url https://download.pytorch.org/whl/cpu
 
 WORKDIR /app
 
@@ -31,8 +25,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Create dedicated non-root user and ensure directory permissions
 RUN useradd -m -u 1000 hazarduser && \
-    mkdir -p /app /tmp/Ultralytics && \
-    chown -R hazarduser:hazarduser /app /tmp/Ultralytics
+    mkdir -p /app /tmp/ultralytics && \
+    chown -R hazarduser:hazarduser /app /tmp/ultralytics
 
 # Copy application files with non-root ownership
 COPY --chown=hazarduser:hazarduser . /app

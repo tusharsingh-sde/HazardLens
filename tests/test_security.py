@@ -293,7 +293,7 @@ class TestMultiCameraRegistryAndAutoHeal:
         assert url == "http://cam01:secret@192.168.137.45:8080/video"
 
         updated = get_paired_camera("CAM 01")
-        assert updated is not None
+        assert updated is not None and isinstance(updated, dict)
         assert updated["last_ip_port"] == "192.168.137.45:8080"
 
 
@@ -326,7 +326,7 @@ class TestSecurityHelpers:
         # Saving genuine camera IP MUST succeed
         assert save_camera_slot("CAM 01", "192.168.1.3:8080") is True
         cam = get_paired_camera("CAM 01")
-        assert cam is not None
+        assert cam is not None and isinstance(cam, dict)
         assert cam["last_ip_port"] == "192.168.1.3:8080"
 
     def test_discover_cameras_on_lan_filters_local_ips(self, monkeypatch):

@@ -5,6 +5,7 @@
 .venv/
 venv/
 __pycache__/
+.yolo/
 
 # Ignore Auto-downloaded base model & Legacy backups
 yolov8n.pt
