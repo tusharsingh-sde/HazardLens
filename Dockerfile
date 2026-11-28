@@ -23,6 +23,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Remove GUI opencv-python pulled by ultralytics & force headless build + verify at build time
+RUN pip uninstall -y opencv-python && \
+    pip install --no-cache-dir --force-reinstall --no-deps "opencv-python-headless>=4.8.0" && \
+    python -c "import cv2; print('OpenCV OK:', cv2.__version__)"
+
 RUN useradd -m -u 1000 hazarduser && \
     mkdir -p /app /tmp/ultralytics /var/log/nginx /var/lib/nginx && \
     chown -R hazarduser:hazarduser /app /tmp/ultralytics /var/log/nginx /var/lib/nginx
