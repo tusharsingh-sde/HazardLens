@@ -1,497 +1,376 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/YOLOv8-Ultralytics-00FFFF?style=for-the-badge&logo=yolo&logoColor=white" alt="YOLOv8" />
   <img src="https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white" alt="Streamlit" />
   <img src="https://img.shields.io/badge/OpenCV-27338E?style=for-the-badge&logo=opencv&logoColor=white" alt="OpenCV" />
   <img src="https://img.shields.io/badge/Edge--TTS-0078D4?style=for-the-badge&logo=microsoft&logoColor=white" alt="Edge-TTS" />
   <img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker" />
+  <img src="https://img.shields.io/badge/Azure_Container_Apps-0078D4?style=for-the-badge&logo=microsoftazure&logoColor=white" alt="Azure" />
+  <img src="https://img.shields.io/badge/Nginx-009639?style=for-the-badge&logo=nginx&logoColor=white" alt="Nginx" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License" />
 </p>
 
-<h1 align="center">⬡ HazardLens</h1>
+<h1 align="center">HazardLens</h1>
 
 <p align="center">
-  <strong>AI-Powered Smart City Surveillance Command Center</strong><br/>
-  <em>Real-Time Fire Detection · Crowd Monitoring · Hindi Neural Voice Alerts · QR Camera Pairing · Email Dispatch</em>
+  <strong>Enterprise NVR & Real-Time AI Threat Detection Console</strong><br/>
+  Dual YOLOv8 fire/smoke + crowd inference pipeline · Native MJPEG streaming at 12-15 FPS · Hindi neural voice alerts · Single-port Nginx reverse proxy · Zero-cost Azure deployment
 </p>
 
 <p align="center">
-  <a href="#-key-features">Features</a> •
-  <a href="#️-system-architecture">Architecture</a> •
-  <a href="#-tech-stack">Tech Stack</a> •
-  <a href="#-getting-started">Getting Started</a> •
-  <a href="#️-camera-pairing">Camera Pairing</a> •
-  <a href="#️-configuration">Configuration</a> •
-  <a href="#-usage">Usage</a> •
-  <a href="#-license">License</a>
+  <a href="https://hazardlens.agreeablesky-0ffa5750.centralindia.azurecontainerapps.io">Live Demo</a> · 
+  <a href="#system-architecture">Architecture</a> · 
+  <a href="#local-development">Dev Setup</a> · 
+  <a href="#connecting-a-live-phone-camera-via-cloudflare-tunnel">Camera Guide</a> · 
+  <a href="#cloud-deployment">Deploy</a>
 </p>
 
----
-
-## 📖 Overview
-
-**HazardLens** is an edge-optimized, autonomous AI surveillance system that transforms a smartphone or IP camera into an intelligent hazard monitoring agent. It runs a **dual YOLOv8 inference pipeline** — a custom-trained fire/smoke model alongside a general-purpose crowd counter — to continuously analyse live video feeds and trigger multi-channel emergency alerts with **zero cloud dependency**.
-
-Camera pairing is **completely wireless** — scan a QR code from your phone or click **⚡ Auto-Link** and the system discovers, verifies, and streams from your phone's IP Webcam app in seconds.
-
-When a hazard is detected, the system simultaneously:
-
-- Renders an animated tactical alert banner on the command center dashboard
-- **Loops a Hindi neural voice alert infinitely** via Microsoft Edge-TTS (`hi-IN-SwaraNeural`) until the operator actively silences it
-- Dispatches an **automated HTML email** to the configured security administrator
-- Applies a **"Latest Hazard Wins"** state machine to prevent alert stacking, UI freezes, and audio collisions
+> **Cold-start note:** The live demo runs on Azure Container Apps with scale-to-zero (`--min-replicas 0`). If the app has been idle, the first request triggers a container cold start that takes ~20-25 seconds. Subsequent loads are instant.
 
 ---
 
-## ❓ Problem Statement
+## System Architecture
 
-Traditional CCTV systems are **passive monitoring tools**. In emergency situations, incidents are detected only after a human operator notices them, verifies them, and manually escalates the alarm. This critical delay increases physical damage, risks human life, and slows down emergency response.
+```mermaid
+flowchart LR
+    subgraph Phone["Mobile IP Webcam (LAN)"]
+        CAM["Android IP Webcam<br/>http://PHONE_IP:8080"]
+    end
 
-**HazardLens** bridges this gap by providing **low-latency automated hazard detection, smart alert prioritization, instant localized voice broadcasts, and zero-configuration wireless camera pairing** — all running at the edge without any cloud servers.
+    subgraph CF["Cloudflare Quick Tunnel"]
+        TUNNEL["cloudflared tunnel<br/>https://random.trycloudflare.com"]
+    end
 
----
+    subgraph AZURE["Azure Container Apps (Port 8501)"]
+        subgraph NGINX["Nginx Reverse Proxy :8501"]
+            ROUTE_UI["/ + WebSocket"]
+            ROUTE_STREAM["/stream<br/>proxy_buffering off"]
+        end
 
-## ✨ Key Features
+        subgraph STREAMLIT["Streamlit UI :8503"]
+            FRAGMENT["1Hz @st.fragment<br/>Telemetry + Alert FSM"]
+        end
 
-| Feature | Description |
-|---|---|
-| 🔥 **Fire & Smoke Detection** | Custom fine-tuned YOLOv8 model with multilingual class mapping (EN/ZH) and `conf ≥ 0.80` threshold |
-| 👥 **Crowd Monitoring** | Real-time person counting via YOLOv8n with configurable overcrowding threshold |
-| 🎙️ **Infinite Hindi Voice Alerts** | Distinct Hindi voice alerts for Fire and Overcrowding via Edge-TTS `hi-IN-SwaraNeural` — loop until operator presses 🔕 Silence |
-| 📲 **QR Camera Pairing** | WhatsApp-style zero-input wireless camera pairing — scan QR code on phone or click ⚡ Auto-Link |
-| 🔗 **Dynamic IP Auto-Heal** | Camera IP is re-discovered automatically on every new Wi-Fi network; `config/paired_cameras.json` stores the last known IP |
-| 📡 **HTTP Frame Grabber** | Fetches `/shot.jpg` snapshots from IP Webcam via `urllib` — bypasses OpenCV FFmpeg MJPEG bugs with zero buffer lag |
-| 📧 **Automated Email Dispatch** | Queued HTML email alerts sent to the security admin via Resend API (non-blocking background worker with retry) |
-| ⚡ **"Latest Hazard Wins" Engine** | Prevents UI freezes, alert looping, and audio overlapping via a finite state machine |
-| 🖥️ **Tactical Command Center UI** | Dark-themed military-inspired dashboard with 4-camera grid, live metrics, and animated alert banners |
-| 🎯 **False-Positive Immunity** | Optimized detection confidence thresholds and 3s debounce grace window to prevent flickering on borderline detections |
-| 🔐 **Operator PIN Gate** | Timing-safe PIN authentication protects ARM / DISARM / SILENCE controls |
-| 🛡️ **SSRF Protection** | URL validator blocks private metadata endpoints, loopback bypasses, and non-HTTP/RTSP schemes |
-| 🐳 **Docker Support** | One-command production deployment with Docker Compose |
+        subgraph MJPEG["Python MJPEG Server :8502"]
+            HTTP_SERVER["ThreadingHTTPServer<br/>multipart/x-mixed-replace"]
+        end
 
----
+        subgraph THREADS["Background Threads"]
+            CW["CameraWorker<br/>Zero-buffer FFmpeg<br/>+ /shot.jpg fallback"]
+            IW["InferenceWorker<br/>best.pt (Fire/Smoke)<br/>yolov8n.pt (Person)"]
+        end
 
-## 🏗️ System Architecture
+        subgraph ALERTS["Alert Pipeline"]
+            TTS["Edge-TTS Hindi Voice<br/>hi-IN-SwaraNeural"]
+            EMAIL["Resend Email Dispatch<br/>Background Worker"]
+        end
+    end
 
-```
-                    ┌──────────────────────────────┐
-                    │  📱 Smartphone (IP Webcam app) │
-                    │   OR any RTSP / IP Camera     │
-                    └─────────────┬────────────────┘
-                                  │  Wi-Fi / LAN
-                    ┌─────────────▼────────────────┐
-                    │  QR Pairing / Auto-Link       │
-                    │  (utils/qr_pairing.py)        │
-                    │  Dynamic IP Registry          │
-                    │  (config/paired_cameras.json) │
-                    └─────────────┬────────────────┘
-                                  │
-                    ┌─────────────▼────────────────┐
-                    │  HTTP Frame Grabber           │
-                    │  GET /shot.jpg  (urllib)      │
-                    │  Fallback: cv2.VideoCapture   │
-                    └─────────────┬────────────────┘
-                                  │
-                    ┌─────────────┴────────────┐
-                    │                          │
-                    ▼                          ▼
-          ┌──────────────────┐      ┌─────────────────┐
-          │  🔥 Engine 1      │      │  👥 Engine 2    │
-          │  Fire / Smoke     │      │  Crowd Counter  │
-          │  (best.pt ~6MB)   │      │  (YOLOv8n ~6MB) │
-          │  conf ≥ 0.80      │      │  class: person  │
-          └────────┬─────────┘      └────────┬────────┘
-                   │                          │
-                   └────────────┬─────────────┘
-                                │
-                   ┌────────────▼─────────────┐
-                   │  Hazard Detection Engine  │
-                   │  "Latest Hazard Wins" FSM │
-                   │  3s Debounce Grace Window │
-                   └────────────┬─────────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              │                 │                  │
-              ▼                 ▼                  ▼
-    ┌──────────────┐  ┌──────────────────┐  ┌──────────────────┐
-    │ 🖥️ Visual    │  │ 🎙️ Hindi Voice   │  │ 📧 Email Alert   │
-    │ Alert Banner  │  │ Alert (looping)  │  │ (Resend Worker)  │
-    │ (Streamlit)   │  │ fire_alert.mp3   │  │ (Background)     │
-    │               │  │ crowd_alert.mp3  │  │                  │
-    └──────────────┘  └──────────────────┘  └──────────────────┘
+    CAM --> TUNNEL
+    TUNNEL --> NGINX
+    ROUTE_UI --> STREAMLIT
+    ROUTE_STREAM --> MJPEG
+    CW --> IW
+    CW --> HTTP_SERVER
+    IW --> FRAGMENT
+    FRAGMENT --> TTS
+    FRAGMENT --> EMAIL
 ```
 
+**Data flow inside the container:**
+
+1. **CameraWorker** (daemon thread) connects to the Cloudflare tunnel URL using OpenCV's C++ FFmpeg backend with zero-buffer flags (`fflags;nobuffer|flags;low_delay|probesize;32768|analyzeduration;0`, `CAP_PROP_BUFFERSIZE=1`). Falls back to persistent `requests.Session` hitting `/shot.jpg` with Keep-Alive if the MJPEG stream drops.
+2. **InferenceWorker** (daemon thread) pulls raw frames from `CameraWorker` by sequence number and runs twin YOLOv8 models (`best.pt` for fire/smoke at `conf >= 0.85`, `yolov8n.pt` for person counting) at `imgsz=320`. Inference never blocks frame ingestion.
+3. **Built-in MJPEG server** (`ThreadingHTTPServer` on port `8502`) reads annotated frames from `CameraWorker` + `InferenceWorker` and streams `multipart/x-mixed-replace` JPEG at ~15 FPS. The browser renders an `<img>` tag pointed at `/stream` — zero Streamlit reruns.
+4. **Nginx** (port `8501`) routes `/` and WebSocket upgrades to Streamlit (`127.0.0.1:8503`) and `/stream` to the MJPEG server (`127.0.0.1:8502`) with `proxy_buffering off`.
+5. **1Hz telemetry fragment** (`@st.fragment(run_every=1.0)`) updates the alert state machine, triggers Hindi voice alerts via Edge-TTS, and dispatches email alerts via Resend.
+
 ---
 
-## 🛠️ Tech Stack
+## Key Engineering Decisions
 
-| Layer | Technology |
+### Decoupled Native MJPEG Streaming (12-15 FPS)
+
+Live video rendering was moved completely outside Streamlit's script-rerun loop. A dedicated `ThreadingHTTPServer` serves `multipart/x-mixed-replace` MJPEG frames that the browser renders natively via `<img src="/stream">`. This eliminated UI dimming, WebSocket queue stalls, frame freezes, and DOM shift artifacts (duplicate camera headers) that plagued the previous `st.image()` / `@st.fragment(run_every=0.10)` approach.
+
+### Single-Port Nginx Reverse Proxy
+
+Bridges Streamlit (internal `8503`) and the MJPEG server (internal `8502`) under one public HTTPS ingress port (`8501`). The `MJPEG_STREAM_URL=/stream` environment variable tells the Streamlit frontend to request video from the same origin, eliminating CORS and mixed-content issues in cloud deployments behind Azure Container Apps or Cloudflare.
+
+### Zero-Buffer Ingestion
+
+Replaced naive HTTP polling with low-delay FFmpeg streaming via `cv2.VideoCapture(url, cv2.CAP_FFMPEG)` configured with `fflags;nobuffer|flags;low_delay|probesize;32768|analyzeduration;0` for sub-second latency over Cloudflare tunnels. A persistent `requests.Session` with `Connection: keep-alive` hitting `/shot.jpg` serves as a resilient fallback when the MJPEG stream temporarily drops.
+
+### NVR Operator UX
+
+- Non-cropping `object-fit: contain` viewport preserving the full HUD (`REC · CAM 01 · timestamp`, `CAM X.X FPS | YOLO XXms`)
+- Per-camera native Browser Fullscreen API toggle (`[ ⛶ ]`) without reloading the stream
+- High-visibility pulsing crimson `🔇 SILENCE ALERT` button with automatic 3-second grace-period audio shutoff when hazards clear
+
+### Lean Headless Container
+
+CPU-only PyTorch wheels, explicit removal of GUI `opencv-python` (pulled transitively by `ultralytics`) in favor of `opencv-python-headless` with build-time `import cv2` verification, non-root `hazarduser` execution, Windows CRLF stripping for `start.sh`/`nginx.conf`, and `/_stcore/health` container healthcheck.
+
+---
+
+## Connecting a Live Phone Camera via Cloudflare Tunnel
+
+Stream a local Android/iOS IP camera into the cloud-deployed dashboard in 5 steps:
+
+### 1. Start the IP Camera App
+
+Install [IP Webcam](https://play.google.com/store/apps/details?id=com.pas.webcam) (Android) on your phone. Start the server — it shows a URL like `http://<PHONE_IP>:8080`.
+
+**Recommended settings for smooth cloud inference:**
+
+| Setting | Value | Why |
+|---|---|---|
+| Resolution | `640x480` | Keeps JPEG frames small (~30-50 KB) for fast tunnel transfer |
+| FPS | `15` | Good lighting maintains steady 12-15 FPS through the tunnel |
+
+### 2. Expose via Cloudflare Quick Tunnel
+
+On a laptop/PC connected to the **same Wi-Fi** as the phone:
+
+```bash
+cloudflared tunnel --url http://<PHONE_IP>:8080
+```
+
+This outputs a URL like (example) `https://random-subdomain.trycloudflare.com` — no Cloudflare account needed.
+
+### 3. Paste the Tunnel URL
+
+Open the HazardLens dashboard. In the sidebar, paste the tunnel URL into **CAM 01 Stream URL**. You can paste the base URL, `/video`, or `/shot.jpg` — `CameraWorker` normalizes all three:
+
+| Input | Resolved URLs |
 |---|---|
-| **Frontend & Dashboard** | [Streamlit](https://streamlit.io/) ≥ 1.30 with custom CSS dark command-center theme |
-| **Computer Vision** | [OpenCV](https://opencv.org/) (`opencv-python-headless`) |
-| **Object Detection** | [Ultralytics YOLOv8](https://docs.ultralytics.com/) — dual model inference |
-| **Fire/Smoke Model** | Custom fine-tuned YOLOv8 (`best.pt` — ~6 MB, included in repo) |
-| **Crowd Model** | YOLOv8n pre-trained (`yolov8n.pt` — ~6 MB, auto-downloaded) |
-| **Voice Engine** | [Microsoft Edge-TTS](https://pypi.org/project/edge-tts/) ≥ 7.3.1 (`hi-IN-SwaraNeural`) |
-| **Camera Pairing** | `utils/qr_pairing.py` — QR code generation, LAN scanner, dynamic IP registry |
-| **Stream Ingestion** | HTTP `/shot.jpg` frame grabber (urllib) + OpenCV VideoCapture fallback |
-| **Email Alerts** | [Resend](https://resend.com) Python SDK (queued background worker with retry) |
-| **QR Code** | `qrcode` library (pure-Python PNG generation) |
-| **Runtime** | Python 3.10+ with `asyncio` |
-| **Containerization** | Docker + Docker Compose |
+| `https://xyz.trycloudflare.com` | `/video` (primary), `/shot.jpg` (fallback) |
+| `https://xyz.trycloudflare.com/video` | `/video` (primary), `/shot.jpg` (fallback) |
+| `https://xyz.trycloudflare.com/shot.jpg` | `/video` (primary), `/shot.jpg` (fallback) |
+
+### 4. ARM the System
+
+Click **ARM SYSTEM**. The `CameraWorker` connects via zero-buffer FFmpeg streaming, and within 1-2 seconds the live feed appears on CAM 01 with YOLO detections and HUD overlay.
+
+### 5. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| 4-6 FPS instead of 12+ | Phone in dark/low-light — camera increases exposure time, dropping FPS | Move to better lighting or point a lamp at the scene |
+| ~20s delay on first load | Azure Container Apps cold start (scale-from-zero) | Wait for initial wake-up; subsequent loads are instant |
+| Feed stops after closing `cloudflared` | Tunnel URL expires when the process stops | Restart `cloudflared tunnel --url ...` and paste the new URL |
+| `CONNECTING` badge stays indefinitely | Phone and laptop on different Wi-Fi networks | Ensure both are on the same LAN before running `cloudflared` |
 
 ---
 
-## 🚀 Getting Started
+## Environment Variables Reference
 
-### Prerequisites
-
-- **Python 3.10 or higher** — [Download Python](https://www.python.org/downloads/)
-- **Git** — [Download Git](https://git-scm.com/downloads)
-- **pip** (comes bundled with Python 3.10+)
-- A phone running **[IP Webcam](https://play.google.com/store/apps/details?id=com.pas.webcam)** (Android) or any RTSP/HTTP IP camera on the same Wi-Fi
+| Variable | Purpose | Required | Default / Example |
+|---|---|---|---|
+| `RESEND_API_KEY` | Resend API key for email alert dispatch | Optional | `re_xxxxxxxxx` |
+| `HAZARDLENS_FROM_EMAIL` | Sender address for alert emails | Optional | `onboarding@resend.dev` |
+| `HAZARDLENS_ADMIN_EMAIL` | Recipient address for alert emails | Optional | `admin@example.com` |
+| `HAZARDLENS_OPERATOR_PIN` | PIN to unlock ARM/DISARM/SILENCE controls | Optional | `1234` |
+| `HAZARDLENS_MODEL_SHA256` | SHA-256 hash of `best.pt` for integrity verification | Optional | `18d47a2e...` |
+| `HAZARDLENS_CAM_USER` | Default camera HTTP auth username | Optional | `cam01` |
+| `HAZARDLENS_CAM_SECRET` | Default camera HTTP auth password | Optional | `your_cam_secret` |
+| `HAZARDLENS_CAM_PORT` | Default port for LAN camera discovery | Optional | `8080` |
+| `HAZARDLENS_DRONE_URL` | Direct camera URL override (skips LAN scan) | Optional | _(empty)_ |
+| `MJPEG_PORT` | Internal MJPEG server port | Optional | `8502` |
+| `MJPEG_STREAM_URL` | Stream endpoint URL used in `<img src>` | Optional | `http://localhost:8502/stream` (local) or `/stream` (Docker) |
+| `YOLO_CONFIG_DIR` | Ultralytics config/cache directory | Optional | `/tmp/ultralytics` (Docker) |
 
 ---
 
-### 1 · Clone the Repository
+## Local Development
+
+### Option A: Native Python
 
 ```bash
 git clone https://github.com/tusharsingh-sde/HazardLens.git
 cd HazardLens
-```
 
----
-
-### 2 · Create a Virtual Environment
-
-<details>
-<summary><strong>🪟 Windows (PowerShell)</strong></summary>
-
-```powershell
 python -m venv venv
-.\venv\Scripts\Activate.ps1
-```
+# Windows: .\venv\Scripts\Activate.ps1
+# Linux/macOS: source venv/bin/activate
 
-> **Note:** If you encounter an execution policy error, run this first:
-> ```powershell
-> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-> ```
-
-</details>
-
-<details>
-<summary><strong>🪟 Windows (Command Prompt)</strong></summary>
-
-```cmd
-python -m venv venv
-venv\Scripts\activate.bat
-```
-
-</details>
-
-<details>
-<summary><strong>🐧 Linux (Ubuntu / Debian)</strong></summary>
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-> **Note:** If `python3-venv` is not installed:
-> ```bash
-> sudo apt update && sudo apt install python3-venv -y
-> ```
-
-</details>
-
-<details>
-<summary><strong>🍎 macOS</strong></summary>
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-> **Note:** If Python is not installed, use [Homebrew](https://brew.sh/):
-> ```bash
-> brew install python@3.10
-> ```
-
-</details>
-
----
-
-### 3 · Install Dependencies
-
-```bash
 pip install -r requirements.txt
-```
 
-| Package | Purpose |
-|---|---|
-| `streamlit >=1.30.0` | Dashboard framework |
-| `ultralytics >=8.1.0` | YOLOv8 inference engine |
-| `opencv-python-headless >=4.8.0` | Video frame processing |
-| `edge-tts >=6.1.10` | Hindi neural voice synthesis |
-| `numpy >=1.24.0` | Numerical array operations |
-| `pillow >=10.0.0` | Image utilities |
-| `python-dotenv >=1.0.0` | Environment configuration management |
-| `resend >=2.0.0` | Official Resend API client for email alerts |
-| `qrcode >=8.0.0` | QR code generation for camera pairing |
-| `dill >=0.3.8` | Extended serialization support |
-
----
-
-### 4 · Configure Environment
-
-```bash
-# Windows (PowerShell)
-Copy-Item .env.example .env
-
-# Linux / macOS
 cp .env.example .env
-```
+# Edit .env with your RESEND_API_KEY and HAZARDLENS_ADMIN_EMAIL
 
-Open `.env` and fill in your settings:
-
-```env
-# Resend API for Automated Email Alerts
-RESEND_API_KEY=re_your_api_key_here
-HAZARDLENS_FROM_EMAIL=onboarding@resend.dev
-HAZARDLENS_ADMIN_EMAIL=admin-recipient@example.com
-
-# Operator Passkey Gate (protects ARM / DISARM / SILENCE controls)
-HAZARDLENS_OPERATOR_PIN=1234
-
-# PyTorch Model Integrity Check (SHA-256 of best.pt)
-HAZARDLENS_MODEL_SHA256=18d47a2e606035a2f1b5303050125a3c6c53b679a7a1b27b25bd72d7a63b3ec3
-```
-
-> **Security Note:** Never commit your `.env` file — it is listed in `.gitignore`.  
-> **Tip:** Get a free API key at [resend.com](https://resend.com). For testing, `onboarding@resend.dev` can send to your verified account email.
-
----
-
-### 5 · Run the Application
-
-```bash
 streamlit run app.py
 ```
 
-The command center launches in your default browser at **`http://localhost:8501`**.
+Opens at `http://localhost:8501`. MJPEG server runs on `8502` (accessed directly since there's no Nginx locally).
 
----
-
-## 📲 Camera Pairing
-
-HazardLens uses a **WhatsApp-style zero-input wireless pairing** system. Your phone becomes the CCTV camera — no cables, no manual IP configuration.
-
-### Option A — QR Code Pairing
-
-1. Open the **IP Webcam** app on your Android phone
-2. Tap **"Start server"** at the bottom — the app displays an IP like `http://192.168.1.3:8080`
-3. In HazardLens sidebar → **🔗 Pair / Manage CCTV Nodes** → click **📲 Show QR Code**
-4. Scan the QR code with your phone's camera
-5. The system automatically detects your phone's IP, verifies the camera stream, saves it to `config/paired_cameras.json`, and arms the system
-
-### Option B — Auto-Link (Recommended)
-
-1. Start the IP Webcam server on your phone (same Wi-Fi)
-2. Click **⚡ Auto-Link** in the sidebar — HazardLens scans the entire LAN subnet, finds the first open port-8080 device, and links instantly
-3. Click **🔴 ARM** — live feed starts immediately
-
-### Changing Wi-Fi / New Location
-
-When the demo location changes and a new Wi-Fi network is used, the phone will get a different IP address. Simply:
-
-- Click **⚡ Auto-Link** again — the system re-discovers the new IP automatically, **no manual editing required**
-- Or update `config/paired_cameras.json` manually:
-
-```json
-{
-  "CAM 01": {
-    "last_ip_port": "192.168.X.X:8080",
-    "user": "",
-    "password": "",
-    "updated_at": "2026-11-16T12:50:00"
-  }
-}
-```
-
-> `config/paired_cameras.json` is in `.gitignore` to prevent leaking private camera IPs.  
-> A safe template is provided at `config/paired_cameras.json.example`.
-
----
-
-## ⚙️ Configuration
-
-### Detection Thresholds
-
-All constants are defined at the top of [`app.py`](app.py) for easy tuning:
-
-| Parameter | Default | Constant | Description |
-|---|---|---|---|
-| Fire/Smoke Confidence | `0.80` | `FIRE_CONF_THRESHOLD` | Minimum confidence score for fire/smoke detection |
-| Crowd Threshold | `1 person` | `CROWD_THRESHOLD` | Person count limit before triggering crowd alert |
-| Frame Skip | `4 frames` | `FRAME_SKIP` | Process every Nth frame for real-time edge throughput |
-| Email Cooldown | `120 s` | `EMAIL_COOLDOWN_SEC` | Minimum interval between email dispatches per hazard type |
-| Audio Cooldown | `120 s` | `AUDIO_COOLDOWN_SEC` | Minimum interval between new voice broadcasts per hazard type |
-| Alert Clear Grace | `3.0 s` | `ALERT_CLEAR_GRACE_SEC` | Debounce window to prevent alert banner flickering |
-| Silence Duration | `60 s` | `SILENCE_DURATION_SEC` | Suppression window when operator presses 🔕 Silence |
-
-### Audio Alert Files
-
-Two distinct pre-generated Hindi voice alerts are stored in the project root:
-
-| File | Alert Type | Voice |
-|---|---|---|
-| `fire_alert.mp3` | 🔥 Fire / Smoke detected | `hi-IN-SwaraNeural` |
-| `crowd_alert.mp3` | 👥 Overcrowding detected | `hi-IN-SwaraNeural` |
-
-Both are auto-generated by `edge-tts` on first startup if missing. They loop **infinitely** until the operator presses **🔕 Silence CAM 01** or clicks **⬛ DISARM**.
-
-> Audio files are excluded from git via `.gitignore` (`*.mp3`).
-
-### Run Tests
+### Option B: Docker (Production Parity)
 
 ```bash
-# Run the full test suite (61 tests)
+docker build -t hazardlens .
+docker run --rm -p 8501:8501 --env-file .env hazardlens
+```
+
+Single port `8501` — Nginx routes `/` to Streamlit and `/stream` to the MJPEG server internally. Same behavior as the cloud deployment.
+
+### Running Tests
+
+```bash
+# Full test suite (59 tests)
 pytest -v
 
-# Validate Resend email configuration
-python scripts/check_resend.py
-
-# Send a live test alert email
-python scripts/check_resend.py --send
+# Headless Streamlit runtime test
+python -c "from streamlit.testing.v1 import AppTest; at = AppTest.from_file('app.py', default_timeout=30).run(); assert not at.exception; print('OK')"
 ```
 
 ---
 
-## 🐳 Docker Deployment
+## Cloud Deployment
+
+HazardLens is packaged as a self-contained Docker image exposing a single HTTP/WebSocket port (`8501`) via an embedded Nginx reverse proxy, so it can be deployed on any container platform (Azure Container Apps, Google Cloud Run, Fly.io, AWS ECS, etc.).
+
+Below is a reference **zero-cost deployment** using GitHub Container Registry (GHCR) and Azure Container Apps (Consumption Plan).
+
+### Prerequisites
+- Docker installed locally
+- GitHub Personal Access Token (PAT) with `write:packages` scope
+- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) authenticated via `az login`
+
+### 1. Build & Push to a Container Registry (GHCR)
+
+From the repository root:
 
 ```bash
-# Build and start the container
-docker compose up --build
+export GITHUB_USER="<YOUR_GITHUB_USERNAME>"
+export IMAGE="ghcr.io/${GITHUB_USER}/hazardlens:v1"
 
-# Access the dashboard
-# http://localhost:8501
+docker build -t "$IMAGE" .
+
+echo "<YOUR_GITHUB_PAT>" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
+docker push "$IMAGE"
 ```
 
-Ensure your `.env` file is populated before running Docker. The `docker-compose.yml` mounts it into the container.
+> **Tip:** Set the package visibility to **Public** under `GitHub -> Profile -> Packages -> hazardlens -> Package Settings` so your cloud provider can pull the image without registry credentials. (For private images, pass `--registry-server`, `--registry-username`, and `--registry-password` during deployment.)
+
+### 2. Provision Azure Infrastructure (Skip if Reusing Existing)
+
+```bash
+export RESOURCE_GROUP="hazardlens-rg"
+export LOCATION="centralindia" # Choose the region closest to your cameras
+export ENV_NAME="hazardlens-env"
+
+az group create --name "$RESOURCE_GROUP" --location "$LOCATION"
+
+az containerapp env create \
+  --name "$ENV_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --location "$LOCATION"
+```
+
+### 3. Deploy to Azure Container Apps
+
+```bash
+az containerapp create \
+  --name hazardlens \
+  --resource-group "$RESOURCE_GROUP" \
+  --environment "$ENV_NAME" \
+  --image "$IMAGE" \
+  --target-port 8501 \
+  --ingress external \
+  --cpu 2.0 \
+  --memory 4.0Gi \
+  --min-replicas 0 \
+  --max-replicas 1 \
+  --secrets \
+    resend-api-key="<YOUR_RESEND_API_KEY>" \
+    cam-secret="<YOUR_CAM_SECRET>" \
+    operator-pin="<YOUR_OPERATOR_PIN>" \
+  --env-vars \
+    RESEND_API_KEY=secretref:resend-api-key \
+    HAZARDLENS_CAM_SECRET=secretref:cam-secret \
+    HAZARDLENS_OPERATOR_PIN=secretref:operator-pin \
+    HAZARDLENS_FROM_EMAIL="onboarding@resend.dev" \
+    HAZARDLENS_ADMIN_EMAIL="<YOUR_ALERT_EMAIL>" \
+    HAZARDLENS_CAM_USER="cam01" \
+    HAZARDLENS_CAM_PORT="8080"
+```
+
+Retrieve the live HTTPS URL once provisioning completes:
+
+```bash
+az containerapp show \
+  --name hazardlens \
+  --resource-group "$RESOURCE_GROUP" \
+  --query properties.configuration.ingress.fqdn \
+  -o tsv
+```
+
+### Scaling & Resource Configuration Rationale
+
+| Flag | Value | Why |
+|---|---|---|
+| `--min-replicas 0` | Scale to zero when idle | Stays within Azure's monthly free grant (180,000 vCPU-s / 360,000 GiB-s) with zero idle cost. Close the browser tab after sessions so the persistent `/stream` connection does not prevent scale-down. |
+| `--max-replicas 1` | Single replica only | `mjpeg_state["worker"]` is held in-memory per replica. Multiple replicas would split UI and `/stream` requests across unsynchronized instances. |
+| `--cpu 2.0 --memory 4.0Gi` | Dual YOLOv8 headroom | Two YOLOv8 models running concurrently on CPU-only PyTorch alongside FFmpeg + Nginx. Prevents CPU throttling and OOM kills during live inference. |
 
 ---
 
-## 🖥️ Usage
+## Detection Thresholds
 
-1. **Launch** the app: `streamlit run app.py`
-2. **Authenticate** as Operator in the sidebar using your PIN (default: `1234`) to unlock ARM/DISARM/SILENCE controls
-3. **Pair your camera** — click ⚡ Auto-Link or scan the QR code (see [Camera Pairing](#-camera-pairing)), or select **🎬 Tactical Demo Simulation** to test with the built-in demo video
-4. **ARM** the system by clicking the 🔴 **ARM** button
-5. The live feed from **CAM 01** will begin processing with dual AI engines
-6. When a hazard is detected:
-   - A **visual alert banner** animates on-screen (red for fire, amber for crowd)
-   - A **Hindi voice alert loops continuously** (distinct audio for fire vs overcrowding)
-   - An **email alert** is dispatched to the admin (if Resend is configured)
-7. Click **🔕 Silence CAM 01** to mute active alerts for 60 seconds
-8. Click **⬛ DISARM** to stop all monitoring and clear alerts
+All constants are defined at the top of [`app.py`](app.py):
+
+| Parameter | Value | Constant |
+|---|---|---|
+| Fire/Smoke confidence | `0.85` | `FIRE_CONF_THRESHOLD` |
+| Crowd limit | `5` persons | `CROWD_THRESHOLD` |
+| Frame skip | `4` | `FRAME_SKIP` |
+| Email cooldown | `120s` | `EMAIL_COOLDOWN_SEC` |
+| Audio cooldown | `120s` | `AUDIO_COOLDOWN_SEC` |
+| Alert clear grace | `3.0s` | `ALERT_CLEAR_GRACE_SEC` |
+| Silence duration | `60s` | `SILENCE_DURATION_SEC` |
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```
 HazardLens/
 ├── alerts/
-│   ├── __init__.py              # Alerts package initializer
-│   └── email_alerts.py          # Resend API queued background worker with retries
-├── assets/
-│   └── demo_feed.mp4            # Offline demo surveillance video stream
+│   ├── __init__.py
+│   └── email_alerts.py          # Resend API queued background worker with retry
 ├── config/
-│   ├── paired_cameras.json      # Live camera registry — IP, credentials, last seen (gitignored)
-│   └── paired_cameras.json.example  # Safe template for version control
-├── scripts/
-│   └── check_resend.py          # Standalone Resend configuration & live email verification
+│   ├── paired_cameras.json      # Live camera registry (gitignored)
+│   └── paired_cameras.json.example
 ├── tests/
-│   ├── __init__.py              # Tests package initializer
-│   ├── test_audio_alerts.py     # Unit tests for looping audio, silence/disarm state resets
-│   ├── test_email_alerts.py     # Unit tests for email cooldown, retries, and missing env
-│   └── test_security.py         # Automated tests for SSRF, PIN auth, QR pairing & model SHA-256
+│   ├── test_audio_alerts.py     # Looping audio, silence/disarm state resets
+│   ├── test_email_alerts.py     # Email cooldown, retries, missing env
+│   └── test_security.py         # SSRF, PIN auth, model SHA-256, camera registry
 ├── utils/
-│   ├── __init__.py              # Utilities package initializer
-│   ├── qr_pairing.py            # QR code generation, LAN camera discovery, IP pairing handler
-│   └── security.py              # SSRF URL validator, PIN check, model hasher, camera registry
+│   ├── __init__.py
+│   └── security.py              # URL validation, PIN check, model hasher, LAN scanner
 ├── .streamlit/
-│   └── config.toml              # Production hardening (CORS, XSRF, error masking)
-├── app.py                       # Main application — UI, inference, alerts, camera worker
-├── best.pt                      # Custom-trained fire/smoke YOLOv8 model (~6 MB)
-├── fire_alert.mp3               # Pre-generated Hindi fire alert audio (gitignored)
-├── crowd_alert.mp3              # Pre-generated Hindi overcrowding alert audio (gitignored)
-├── Dockerfile                   # Production Docker image definition
-├── docker-compose.yml           # One-command deployment configuration
+│   └── config.toml              # Streamlit server config (headless, CORS, XSRF)
+├── app.py                       # Main application (2240 lines) — UI, workers, alerts
+├── best.pt                      # Custom-trained fire/smoke YOLOv8 model
+├── yolov8n.pt                   # Pre-trained person detection model
+├── nginx.conf                   # Reverse proxy config (single-port, WebSocket, MJPEG)
+├── start.sh                     # Container entrypoint (Nginx + Streamlit)
+├── Dockerfile                   # Production image (python:3.12-slim, non-root)
+├── docker-compose.yml           # One-command local Docker deployment
 ├── requirements.txt             # Python dependencies
-├── .env.example                 # Environment configuration template
-├── .env                         # Local credentials (gitignored)
-├── .gitignore                   # Git ignore rules
-└── README.md                    # Project documentation
+├── .env.example                 # Environment variable template
+└── .dockerignore                # Excludes secrets, venv, tests, .mp3 from image
 ```
 
 ---
 
-## 🎯 Use Cases
-
-- 🏙️ **Smart Cities & Urban Surveillance** — Citywide hazard monitoring at intersections and public spaces
-- 🎓 **University Campuses** — Gate entry monitoring and crowd management during events
-- 🚉 **Railway Stations & Airports** — Platform overcrowding detection and fire safety
-- 🏬 **Shopping Malls & Retail** — Real-time occupancy monitoring and emergency response
-- 🏭 **Industrial Facilities** — Warehouse fire detection and worker safety compliance
-- 🎪 **Public Events & Concerts** — Crowd density tracking and stampede prevention
-
----
-
-## 🔮 Roadmap
-
-- [x] QR code wireless camera pairing
-- [x] Auto-IP healing (auto-discovery on new Wi-Fi)
-- [x] Infinite looping Hindi voice alerts (fire + overcrowding, distinct audio)
-- [x] Docker containerization for one-command deployment
-- [x] Fragment-safe UI (no CSS wipe on button callbacks)
-- [ ] Multi-camera simultaneous AI processing
-- [ ] Cloud-based alert dashboard with historical logs
-- [ ] Weapon / suspicious object detection model integration
-- [ ] Mobile push notifications via Firebase / Telegram
-- [ ] Recording & playback of flagged incident clips
-- [ ] RTSP stream support for enterprise CCTV systems
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! To get started:
-
-1. **Fork** this repository
-2. **Create** a feature branch: `git checkout -b feature/your-feature-name`
-3. **Commit** your changes: `git commit -m "feat: add your feature"`
-4. **Push** to the branch: `git push origin feature/your-feature-name`
-5. **Open** a Pull Request
-
----
-
-## 👨‍💻 Author
+## Author
 
 **Tushar Singh**
 
-B.Tech CSE Student · AI/ML & Software Development Enthusiast
-
 [![GitHub](https://img.shields.io/badge/GitHub-tusharsingh--sde-181717?style=flat-square&logo=github)](https://github.com/tusharsingh-sde)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-HazardLens-FF4B4B?style=flat-square&logo=streamlit)](https://hazardlens.agreeablesky-0ffa5750.centralindia.azurecontainerapps.io)
 
----
+## License
 
-## 📜 License
-
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
-
----
-
-<p align="center">
-  <sub>Built with ❤️ and a lot of ☕ by <a href="https://github.com/tusharsingh-sde">Tushar Singh</a></sub>
-</p>
+MIT — see [LICENSE](LICENSE) for details.
