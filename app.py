@@ -11,14 +11,23 @@ import base64
 import cv2
 import numpy as np
 from ultralytics import YOLO
+try:
+    import torch
+    torch.set_num_threads(2)
+except Exception:
+    pass
 from datetime import datetime
 import edge_tts
 import asyncio
 import hashlib
 import time
+import math
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 import requests
+import requests.adapters
+import re
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
 
@@ -60,8 +69,8 @@ email_alerter = get_email_alerter()
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-FIRE_CONF_THRESHOLD   = 0.80
-CROWD_THRESHOLD       = 1
+FIRE_CONF_THRESHOLD   = 0.85
+CROWD_THRESHOLD       = 5
 FRAME_SKIP            = 4
 EMAIL_COOLDOWN_SEC    = 120
 AUDIO_COOLDOWN_SEC    = 120
@@ -309,6 +318,7 @@ section[data-testid="stSidebar"] {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 7px 10px;
   background: var(--surface-elevated);
   border: 1px solid var(--border);
@@ -318,12 +328,16 @@ section[data-testid="stSidebar"] {
   font-family: var(--sans);
   font-size: 11px;
   color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .sb-setting-val {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 500;
   color: var(--text);
+  white-space: nowrap;
+  text-align: right;
 }
 
 /* ── STREAMLIT INPUTS ── */
@@ -721,6 +735,7 @@ div[data-testid="stAudio"] {
 # ─────────────────────────────────────────────────────────────────────────────
 if 'system_armed'      not in st.session_state: st.session_state.system_armed      = False
 if 'is_operator'       not in st.session_state: st.session_state.is_operator       = True
+if 'focus_cam_01'      not in st.session_state: st.session_state.focus_cam_01      = False
 if 'paired_camera_url' not in st.session_state: st.session_state.paired_camera_url  = None
 if 'do_clear_alert'    not in st.session_state: st.session_state.do_clear_alert    = False
 if 'active_alert'      not in st.session_state: st.session_state.active_alert      = None
@@ -792,6 +807,8 @@ def disarm_system():
     if st.session_state.get('camera_worker') is not None:
         st.session_state.camera_worker.stop()
         st.session_state.camera_worker = None
+    if "mjpeg_state" in globals():
+        mjpeg_state["worker"] = None
 
 def arm_system():
     st.session_state.system_armed = True
@@ -823,6 +840,24 @@ def create_placeholder(cam_name, status="STANDBY"):
     cv2.putText(img, text, (cx - tw // 2, cy + th // 2),
                 font, scale, (122, 113, 113), thickness, cv2.LINE_AA)
     return img
+
+@st.cache_data
+def get_placeholder_b64(cam_name: str, status: str = "STANDBY") -> str:
+    """Pre-encodes placeholder image into a Base64 data URI string to avoid /media/ storage."""
+    img = create_placeholder(cam_name, status)
+    ret, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 65])
+    if ret and buf is not None:
+        return base64.b64encode(buf.tobytes()).decode("ascii")
+    return ""
+
+def render_cam_view(b64_str: str):
+    max_h = "74vh" if st.session_state.get("focus_cam_01", False) else "none"
+    st.markdown(
+        f'''<div style="width:100%; aspect-ratio:16/9; max-height:{max_h}; background:#0C0C0E; border-radius:6px; overflow:hidden; display:flex; align-items:center; justify-content:center;">
+  <img src="data:image/jpeg;base64,{b64_str}" style="width:100%; height:100%; object-fit:contain; display:block;" />
+</div>''',
+        unsafe_allow_html=True
+    )
 
 # ---------------------------------------------------------
 # --- EDGE-TTS HINDI NEURAL VOICE (SAFE ISOLATED THREAD) ---
@@ -983,6 +1018,8 @@ def play_persistent_audio(b64_audio: str | None = None, audio_id: int = 0, force
     except Exception as e:
         print(f"Parent-window audio controller error: {e}")
 
+play_browser_audio = play_persistent_audio
+
 # ---------------------------------------------------------
 # --- DECOUPLED ASYNC DUAL-YOLO INFERENCE WORKER ---
 # ---------------------------------------------------------
@@ -1022,11 +1059,17 @@ class InferenceWorker:
         self.thread = None
 
     def _run_loop(self, get_frame_fn):
+        try:
+            import torch
+            torch.set_num_threads(2)
+        except Exception:
+            pass
+
         while self.running:
             # Grab latest raw frame from CameraWorker
             frame, seq = get_frame_fn()
             if frame is None or seq == self._last_processed_seq:
-                time.sleep(0.005)
+                time.sleep(0.01)
                 continue
 
             self._last_processed_seq = seq
@@ -1085,6 +1128,9 @@ class InferenceWorker:
             except Exception:
                 pass
 
+            # Throttle inference to ~3-4 FPS so PyTorch never starves CPU or Streamlit's Tornado WebSocket
+            time.sleep(0.30)
+
 
 # ---------------------------------------------------------
 # --- ZERO-BUFFER PERSISTENT STREAM GRABBER (CAMERA WORKER) ---
@@ -1092,11 +1138,9 @@ class InferenceWorker:
 class CameraWorker:
     """
     High-performance zero-buffer camera stream grabber with decoupled async YOLO inference.
-    - Persistent requests.Session() eliminates TCP+TLS handshakes per frame over Cloudflare Quick Tunnel.
-    - Primary mode: Streams MJPEG from {base_url}/video with boundary parser and zero-buffer latest-frame-only rule.
-    - Fallback mode: Polls {base_url}/shot.jpg over the SAME persistent HTTP Keep-Alive session with zero inter-frame sleep.
-    - Fallback for local files / RTSP: cv2.VideoCapture with auto-looping.
-    - Decoupled InferenceWorker: Runs YOLO inference (imgsz=320) asynchronously in the background.
+    - Persistent requests.Session() hitting {base_url}/shot.jpg directly (zero MJPEG latency/timeouts).
+    - Rolling capture FPS tracking (cam_fps) for real-time telemetry.
+    - Zero lock contention: network I/O and JPEG decoding occur outside the lock.
     """
     def __init__(self, ip_url, fire_mod, base_mod, fire_conf, crowd_thresh, frame_skip):
         self.ip_url = ip_url
@@ -1111,10 +1155,16 @@ class CameraWorker:
         self.capture_thread: threading.Thread | None = None
         self.session: requests.Session | None = None
         self.cap: cv2.VideoCapture | None = None
+        self._active_resp: requests.Response | None = None
 
         self.latest_raw_frame: np.ndarray | None = None
         self.latest_frame: np.ndarray | None = None  # Backward-compatibility alias
         self.frame_seq: int = 0
+
+        # Rolling capture FPS tracking
+        self.cam_fps: float = 0.0
+        self._fps_last_time: float = time.time()
+        self._frame_count: int = 0
 
         # Sub-worker for asynchronous YOLO inference
         self.inference_worker = InferenceWorker(
@@ -1124,7 +1174,6 @@ class CameraWorker:
             crowd_thresh=crowd_thresh
         )
 
-        # URL normalization for HTTP network cameras (e.g. IP Webcam or Cloudflare tunnel)
         self.is_http = str(self.ip_url).startswith("http://") or str(self.ip_url).startswith("https://")
         if self.is_http:
             clean_url = str(self.ip_url).rstrip("/")
@@ -1162,9 +1211,10 @@ class CameraWorker:
                 return self.latest_raw_frame.copy(), self.frame_seq
             return None, -1
 
-    def get_display_data(self) -> tuple[np.ndarray | None, list, int, bool, float]:
+    def get_display_data(self) -> tuple[np.ndarray | None, list, int, bool, float, float]:
         with self.lock:
             raw = self.latest_raw_frame.copy() if self.latest_raw_frame is not None else None
+            fps = self.cam_fps
 
         if self.inference_worker:
             with self.inference_worker.lock:
@@ -1175,7 +1225,7 @@ class CameraWorker:
         else:
             dets, p_cnt, fire_f, inf_ms = [], 0, False, 0.0
 
-        return raw, dets, p_cnt, fire_f, inf_ms
+        return raw, dets, p_cnt, fire_f, inf_ms, fps
 
     def start(self):
         if self.running and self.capture_thread and self.capture_thread.is_alive():
@@ -1187,6 +1237,12 @@ class CameraWorker:
 
     def stop(self):
         self.running = False
+        if self._active_resp is not None:
+            try:
+                self._active_resp.close()
+            except Exception:
+                pass
+            self._active_resp = None
         if self.session is not None:
             try:
                 self.session.close()
@@ -1214,14 +1270,79 @@ class CameraWorker:
         else:
             self._capture_cv2_loop()
 
+    def _update_frame(self, frame: np.ndarray) -> float:
+        now = time.time()
+        with self.lock:
+            self.latest_raw_frame = frame
+            self.latest_frame = frame
+            self.frame_seq += 1
+            self._frame_count += 1
+            dt = now - self._fps_last_time
+            if dt >= 1.0:
+                self.cam_fps = round(self._frame_count / dt, 1)
+                self._frame_count = 0
+                self._fps_last_time = now
+        return now
+
+    def _clear_stale_frame(self):
+        with self.lock:
+            self.latest_raw_frame = None
+            self.latest_frame = None
+            self.cam_fps = 0.0
+
+    def _stream_mjpeg_ffmpeg(self) -> bool:
+        """
+        Uses OpenCV's native C++ FFmpeg backend with low-delay/nobuffer options
+        for smooth 15 FPS MJPEG streaming over Cloudflare Tunnel (<500ms latency).
+        """
+        if not self.video_url:
+            return False
+
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            "fflags;nobuffer|flags;low_delay|probesize;32768|analyzeduration;0"
+        )
+        cap = cv2.VideoCapture(str(self.video_url), cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap = cap
+
+        if not cap.isOpened():
+            try:
+                cap.release()
+            except Exception:
+                pass
+            self.cap = None
+            return False
+
+        got_any_frame = False
+        consecutive_fails = 0
+        try:
+            while self.running and cap.isOpened():
+                # No sleep here: cap.read() naturally paces to camera FPS and keeps FFmpeg buffer empty
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    self._update_frame(frame)
+                    got_any_frame = True
+                    consecutive_fails = 0
+                else:
+                    consecutive_fails += 1
+                    if consecutive_fails >= 15:
+                        break
+                    time.sleep(0.02)
+        finally:
+            try:
+                cap.release()
+            except Exception:
+                pass
+            if self.cap is cap:
+                self.cap = None
+        return got_any_frame
+
     def _capture_http_loop(self):
-        target_url = self.shot_url
-        if not target_url:
+        if not self.shot_url and not self.video_url:
             return
 
-        # Configure persistent requests.Session with connection pooling & Keep-Alive
         self.session = requests.Session()
-        adapter = HTTPAdapter(pool_connections=2, pool_maxsize=4, max_retries=1)
+        adapter = HTTPAdapter(pool_connections=2, pool_maxsize=4, max_retries=0)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
@@ -1231,36 +1352,43 @@ class CameraWorker:
         }
 
         last_successful_fetch = time.time()
-        while self.running:
-            try:
-                resp = self.session.get(
-                    target_url,
-                    timeout=(2.5, 2.5),
-                    headers=headers
-                )
-                if resp.status_code == 200 and resp.content:
-                    img_np = np.frombuffer(resp.content, dtype=np.uint8)
-                    frame = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
-                    if frame is not None and frame.size > 0:
-                        with self.lock:
-                            self.latest_raw_frame = frame
-                            self.latest_frame = frame
-                            self.frame_seq += 1
-                        last_successful_fetch = time.time()
-                else:
-                    # Keep last valid frame on transient errors; only clear after >6s continuous failure
-                    if time.time() - last_successful_fetch > 6.0:
-                        with self.lock:
-                            self.latest_raw_frame = None
-                            self.latest_frame = None
-            except Exception:
-                # Keep last valid frame on transient network drops; only clear after >6s continuous failure
-                if time.time() - last_successful_fetch > 6.0:
-                    with self.lock:
-                        self.latest_raw_frame = None
-                        self.latest_frame = None
+        self._fps_last_time = time.time()
+        self._frame_count = 0
 
-            time.sleep(0.03)
+        while self.running:
+            # Primary: native C++ FFmpeg zero-buffer MJPEG stream (/video)
+            if self.video_url:
+                try:
+                    if self._stream_mjpeg_ffmpeg():
+                        last_successful_fetch = time.time()
+                        continue
+                except Exception:
+                    pass
+
+            if not self.running:
+                break
+
+            # Fallback: Keep-Alive /shot.jpg for 5s if /video is temporarily unavailable
+            fallback_until = time.time() + 5.0
+            while self.running and time.time() < fallback_until:
+                try:
+                    if self.shot_url is not None:
+                        resp = self.session.get(
+                            self.shot_url,
+                            timeout=(2.0, 2.0),
+                            headers=headers
+                        )
+                        if resp.status_code == 200 and resp.content:
+                            img_np = np.frombuffer(resp.content, dtype=np.uint8)
+                            frame = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+                            if frame is not None and frame.size > 0:
+                                last_successful_fetch = self._update_frame(frame)
+                        elif time.time() - last_successful_fetch > 6.0:
+                            self._clear_stale_frame()
+                except Exception:
+                    if time.time() - last_successful_fetch > 6.0:
+                        self._clear_stale_frame()
+                time.sleep(0.03)
 
     def _capture_cv2_loop(self):
         try:
@@ -1269,15 +1397,24 @@ class CameraWorker:
         except Exception:
             self.cap = None
 
+        self._fps_last_time = time.time()
+        self._frame_count = 0
         failed_reads = 0
         while self.running:
             if self.cap is not None and self.cap.isOpened():
                 ret, frame = self.cap.read()
                 if ret and frame is not None and frame.size > 0:
+                    now = time.time()
                     with self.lock:
                         self.latest_raw_frame = frame
                         self.latest_frame = frame
                         self.frame_seq += 1
+                        self._frame_count += 1
+                        dt = now - self._fps_last_time
+                        if dt >= 1.0:
+                            self.cam_fps = round(self._frame_count / dt, 1)
+                            self._frame_count = 0
+                            self._fps_last_time = now
                     failed_reads = 0
                     time.sleep(0.03)  # ~30 FPS for local file/stream
                     continue
@@ -1287,10 +1424,17 @@ class CameraWorker:
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     ret, frame = self.cap.read()
                     if ret and frame is not None and frame.size > 0:
+                        now = time.time()
                         with self.lock:
                             self.latest_raw_frame = frame
                             self.latest_frame = frame
                             self.frame_seq += 1
+                            self._frame_count += 1
+                            dt = now - self._fps_last_time
+                            if dt >= 1.0:
+                                self.cam_fps = round(self._frame_count / dt, 1)
+                                self._frame_count = 0
+                                self._fps_last_time = now
                         time.sleep(0.03)
                         continue
 
@@ -1313,7 +1457,7 @@ class CameraWorker:
 # ---------------------------------------------------------
 # --- FAST BGR/HUD OVERLAY & PRE-ENCODED JPEG RENDERING ---
 # ---------------------------------------------------------
-def draw_hud_and_detections(frame: np.ndarray, detections: list, inf_ms: float = 0.0) -> np.ndarray:
+def draw_hud_and_detections(frame: np.ndarray, detections: list, inf_ms: float = 0.0, cam_fps: float = 0.0) -> np.ndarray:
     """
     Renders cached YOLO bounding boxes and CCTV HUD overlay onto the raw camera frame.
     Runs on the display thread so video plays smoothly at high FPS even while YOLO runs asynchronously.
@@ -1355,15 +1499,110 @@ def draw_hud_and_detections(frame: np.ndarray, detections: list, inf_ms: float =
     cv2.putText(annotated, cctv_text, (14, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(annotated, cctv_text, (14, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (250, 250, 250), 1, cv2.LINE_AA)
 
-    # 3. Latency / Telemetry Indicator (Top-Right)
+    # 3. Latency / Telemetry Indicator (Top-Right): "CAM 9.2 FPS | YOLO 180ms"
+    telemetry_parts = []
+    if cam_fps > 0:
+        telemetry_parts.append(f"CAM {cam_fps:.1f} FPS")
     if inf_ms > 0:
-        telemetry_text = f"YOLO {int(inf_ms)}ms"
+        telemetry_parts.append(f"YOLO {int(inf_ms)}ms")
+
+    if telemetry_parts:
+        telemetry_text = " | ".join(telemetry_parts)
         (tw2, _), _ = cv2.getTextSize(telemetry_text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
         tx = max(10, w - tw2 - 14)
         cv2.putText(annotated, telemetry_text, (tx, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(annotated, telemetry_text, (tx, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (16, 185, 129), 1, cv2.LINE_AA)
 
     return annotated
+
+# ---------------------------------------------------------
+# --- NATIVE BUILT-IN MJPEG SERVER (ZERO STREAMLIT LAG) ---
+# ---------------------------------------------------------
+class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+@st.cache_resource
+def get_mjpeg_server():
+    """
+    Serves native multipart/x-mixed-replace MJPEG frames on port 8502.
+    Browser renders <img> natively at 15 FPS without triggering Streamlit reruns.
+    """
+    state = {"worker": None}
+    connecting_jpg = base64.b64decode(get_placeholder_b64("CAM 01", "CONNECTING"))
+
+    class MJPEGHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return
+
+        def do_GET(self):
+            if not self.path.startswith("/stream"):
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Connection", "close")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            last_seq = -1
+            last_sent_ts = 0.0
+
+            try:
+                while True:
+                    worker = state.get("worker")
+                    if worker is None or not getattr(worker, "running", False):
+                        break
+
+                    raw_frame, detections, _, _, inf_ms, cam_fps = worker.get_display_data()
+                    seq = getattr(worker, "frame_seq", -1)
+                    now = time.time()
+
+                    if raw_frame is None:
+                        if now - last_sent_ts >= 0.5:
+                            jpg = connecting_jpg
+                            self.wfile.write(
+                                b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                + str(len(jpg)).encode("ascii") + b"\r\n\r\n" + jpg + b"\r\n"
+                            )
+                            self.wfile.flush()
+                            last_sent_ts = now
+                        time.sleep(0.08)
+                        continue
+
+                    if seq == last_seq and (now - last_sent_ts) < 0.25:
+                        time.sleep(0.02)
+                        continue
+
+                    annotated = draw_hud_and_detections(raw_frame, detections, inf_ms, cam_fps)
+                    ret, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if ret and buf is not None and len(buf) > 0:
+                        jpg = buf.tobytes()
+                        self.wfile.write(
+                            b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                            + str(len(jpg)).encode("ascii") + b"\r\n\r\n" + jpg + b"\r\n"
+                        )
+                        self.wfile.flush()
+                        last_seq = seq
+                        last_sent_ts = now
+
+                    time.sleep(0.04)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                pass
+
+    port = int(os.environ.get("MJPEG_PORT", "8502"))
+    try:
+        server = _ReusableThreadingHTTPServer(("0.0.0.0", port), MJPEGHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    except OSError:
+        pass
+    return state
+
+mjpeg_state = get_mjpeg_server()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR — Enterprise Control Console
@@ -1445,6 +1684,8 @@ with st.sidebar:
                 )
                 st.session_state.camera_worker = new_worker
                 new_worker.start()
+                mjpeg_state["worker"] = new_worker
+                st.session_state["stream_token"] = st.session_state.get("stream_token", 0) + 1
 
                 st.toast("System Armed · Monitoring Active")
                 st.rerun()
@@ -1453,6 +1694,11 @@ with st.sidebar:
             disarm_system()
             st.toast("System Disarmed · Standby Mode")
             st.rerun()
+
+    view_label = "Exit Full View (2x2 Grid)" if st.session_state.focus_cam_01 else "Expand CAM 01 (Full View)"
+    if st.button(view_label, width="stretch", key="btn_toggle_focus"):
+        st.session_state.focus_cam_01 = not st.session_state.focus_cam_01
+        st.rerun()
 
     # ── TELEMETRY & ESSENTIAL SETTINGS ──
     st.markdown(f"""
@@ -1492,37 +1738,48 @@ else:
     ip_url = ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SLIM HEADER BAR
+# SLIM HEADER BAR (DYNAMIC REAL-TIME TELEMETRY)
 # ─────────────────────────────────────────────────────────────────────────────
-worker_obj = st.session_state.get('camera_worker')
-has_active_feed = (armed and worker_obj is not None and getattr(worker_obj, 'latest_frame', None) is not None)
-active_cams = "1" if has_active_feed else "0"
-status_pill_cls = "status-armed" if armed else "status-standby"
-dot_cls = "dot-emerald" if armed else "dot-amber"
-status_txt = "ARMED" if armed else "STANDBY"
+def render_header_bar():
+    is_sys_armed = st.session_state.get('system_armed', False)
+    worker_inst = st.session_state.get('camera_worker')
+    if is_sys_armed:
+        if worker_inst is not None:
+            has_feed = bool(getattr(worker_inst, 'running', False))
+        else:
+            has_feed = bool(st.session_state.get('paired_camera_url') or ip_url or True)
+    else:
+        has_feed = False
 
-st.markdown(f"""
-<div class="hz-header-bar">
-  <div class="hz-header-left">
-    <span class="hz-title">Live Monitoring</span>
-    <span class="hz-loc-tag">MIET Campus</span>
-  </div>
-  <div class="hz-header-right">
-    <div class="pill">
-      <span class="pill-label">Active</span>
-      <span class="pill-val">{active_cams}/4</span>
+    active_cams = "1" if has_feed else "0"
+    status_pill_cls = "status-armed" if is_sys_armed else "status-standby"
+    dot_cls = "dot-emerald" if is_sys_armed else "dot-amber"
+    status_txt = "ARMED" if is_sys_armed else "STANDBY"
+
+    st.markdown(f"""
+    <div class="hz-header-bar">
+      <div class="hz-header-left">
+        <span class="hz-title">Live Monitoring</span>
+        <span class="hz-loc-tag">MIET Campus</span>
+      </div>
+      <div class="hz-header-right">
+        <div class="pill">
+          <span class="pill-label">Active</span>
+          <span class="pill-val">{active_cams}/4</span>
+        </div>
+        <div class="pill">
+          <span class="pill-label">Crowd Limit</span>
+          <span class="pill-val">{CROWD_THRESHOLD}</span>
+        </div>
+        <div class="status-pill {status_pill_cls}">
+          <span class="dot {dot_cls}"></span>
+          <span>{status_txt}</span>
+        </div>
+      </div>
     </div>
-    <div class="pill">
-      <span class="pill-label">Crowd Limit</span>
-      <span class="pill-val">{CROWD_THRESHOLD}</span>
-    </div>
-    <div class="status-pill {status_pill_cls}">
-      <span class="dot {dot_cls}"></span>
-      <span>{status_txt}</span>
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
+
+render_header_bar()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TOP ALERT BANNER (FRAGMENT SCOPED — PERSISTENT ACROSS RERUNS)
@@ -1574,15 +1831,6 @@ def render_alert_banner():
           </div>
         </div>""", unsafe_allow_html=True)
 
-if hasattr(st, "fragment"):
-    @st.fragment(run_every=0.5)
-    def alert_banner_fragment():
-        render_alert_banner()
-
-    alert_banner_fragment()
-else:
-    render_alert_banner()
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CAMERA GRID (2x2 ENTERPRISE NVR LAYOUT)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1590,28 +1838,159 @@ live_badge    = '<span class="badge-status badge-live"><span class="dot dot-emer
 warn_badge    = '<span class="badge-status badge-warn"><span class="dot dot-amber"></span>CONNECTING</span>'
 offline_badge = '<span class="badge-status badge-offline"><span class="dot dot-muted"></span>OFFLINE</span>'
 
-def render_cam_01_feed(stream_url):
-    """Dynamic feed, card top bar, contextual silence, and hazard detection for CAM 01."""
+def _get_alert_banner_html() -> str:
+    armed = st.session_state.get("system_armed", False)
+    now = time.time()
+    is_silenced = (now < st.session_state.get('silenced_until', 0.0))
+    active_alert = st.session_state.get("active_alert")
+
+    if not armed or is_silenced or not active_alert:
+        return ""
+
+    if active_alert == "FIRE":
+        return """
+        <div class="a-banner a-fire">
+          <div class="a-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6
+                       .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0
+                       c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
+            </svg>
+          </div>
+          <div class="a-content">
+            <div class="a-kicker">Hazard Alert</div>
+            <div class="a-ttl">Fire / Smoke Detected on CAM 01</div>
+            <div class="a-msg">MIET College Main Gate · High-confidence AI detection · Automated dispatch active</div>
+          </div>
+        </div>"""
+    elif active_alert == "CROWD":
+        live_count = st.session_state.get("live_crowd_count", 0)
+        return f"""
+        <div class="a-banner a-crwd">
+          <div class="a-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+          </div>
+          <div class="a-content">
+            <div class="a-kicker">Occupancy Advisory</div>
+            <div class="a-ttl">Crowd Limit Exceeded on CAM 01</div>
+            <div class="a-msg">MIET College Main Gate · Live Count: {live_count} persons (Threshold: {CROWD_THRESHOLD})</div>
+          </div>
+        </div>"""
+    return ""
+
+
+def _render_cam_01_telemetry_and_alerts():
+    """Lightweight 1Hz status updater (NEVER touches or reloads the live MJPEG <img>)."""
     if st.session_state.pop("silence_toast_pending", False):
         st.toast(f"CAM 01 alerts silenced for {SILENCE_DURATION_SEC}s.")
 
     armed = st.session_state.get("system_armed", False)
+    worker = st.session_state.get("camera_worker")
     now = time.time()
-    is_silenced = (now < st.session_state.get('silenced_until', 0.0))
+    is_silenced = (now < st.session_state.get("silenced_until", 0.0))
 
-    # When disarmed, ensure worker stopped and render clean standby state
+    if not armed or worker is None:
+        return
+
+    raw_frame, _, person_count, fire_spotted, _, _ = worker.get_display_data()
+    st.session_state.live_crowd_count = person_count
+
+    # Hazard Detection State Machine
+    if is_silenced:
+        st.session_state.active_alert = None
+        st.session_state.active_audio_b64 = None
+        st.session_state.audio_expire_ts = 0.0
+        play_persistent_audio(None, 0)
+        if not fire_spotted and person_count <= CROWD_THRESHOLD:
+            if st.session_state.hazard_clear_ts is None:
+                st.session_state.hazard_clear_ts = now
+            elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
+                st.session_state.silenced_until = 0.0
+                st.session_state.hazard_clear_ts = None
+        else:
+            st.session_state.hazard_clear_ts = None
+    else:
+        if fire_spotted:
+            st.session_state.hazard_clear_ts = None
+            if st.session_state.get("active_alert") != "FIRE":
+                if now - st.session_state.last_audio_ts.get("FIRE", 0.0) > AUDIO_COOLDOWN_SEC:
+                    trigger_hindi_alert(FIRE_TTS_TEXT)
+                    st.session_state.last_audio_ts["FIRE"] = now
+                email_alerter.send_alert("FIRE")
+            st.session_state.active_alert = "FIRE"
+        elif person_count > CROWD_THRESHOLD:
+            st.session_state.hazard_clear_ts = None
+            if st.session_state.get("active_alert") != "CROWD":
+                if now - st.session_state.last_audio_ts.get("CROWD", 0.0) > AUDIO_COOLDOWN_SEC:
+                    trigger_hindi_alert(CROWD_TTS_TEXT)
+                    st.session_state.last_audio_ts["CROWD"] = now
+                email_alerter.send_alert("CROWD", person_count)
+            st.session_state.active_alert = "CROWD"
+        else:
+            if st.session_state.get("active_alert") is not None:
+                if st.session_state.hazard_clear_ts is None:
+                    st.session_state.hazard_clear_ts = now
+                elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
+                    st.session_state.active_alert = None
+                    st.session_state.hazard_clear_ts = None
+                    st.session_state.active_audio_b64 = None
+                    st.session_state.audio_expire_ts = 0.0
+                    st.session_state.stop_audio_id = st.session_state.get("stop_audio_id", 0) + 1
+
+    active_b64 = st.session_state.get("active_audio_b64")
+    active_id = st.session_state.get("active_audio_id", 0)
+    if armed and not is_silenced and active_b64:
+        play_persistent_audio(active_b64, active_id)
+    else:
+        st.session_state.active_audio_b64 = None
+        play_persistent_audio(None, 0)
+
+    # Single combined HTML element -> prevents DOM index shift & duplicate CAM 01 headers
+    badge1 = live_badge if (raw_frame is not None) else warn_badge
+    banner_html = _get_alert_banner_html()
+    hdr_html = f"""
+    <div class="cam-card-hdr">
+      <div class="cam-card-meta">
+        <span class="cam-id">CAM 01</span>
+        <span class="cam-name">MIET College Main Gate</span>
+      </div>
+      <div class="cam-card-right">
+        <span class="cam-crowd-count">{person_count} / {CROWD_THRESHOLD}</span>
+        {badge1}
+      </div>
+    </div>"""
+    st.markdown(banner_html + hdr_html, unsafe_allow_html=True)
+
+    # Silence button tab tak dikhega jab tak alert ya audio dono mein se kuch bhi active hai
+    if armed and not is_silenced and (
+        st.session_state.get("active_alert") is not None
+        or st.session_state.get("active_audio_b64") is not None
+    ):
+        st.button("Silence Alert", key="silence_1", on_click=silence_alerts, width="stretch")
+
+
+def render_cam_01_section(stream_url: str):
+    """Renders CAM 01 card: 1Hz telemetry fragment + uninterrupted native MJPEG video."""
+    armed = st.session_state.get("system_armed", False)
+
     if not armed:
-        if st.session_state.get('camera_worker') is not None:
+        mjpeg_state["worker"] = None
+        if st.session_state.get("camera_worker") is not None:
             try:
                 st.session_state.camera_worker.stop()
             except Exception:
                 pass
             st.session_state.camera_worker = None
-
         st.session_state.active_alert = None
         st.session_state.hazard_clear_ts = None
         st.session_state.active_audio_b64 = None
-        st.session_state.audio_expire_ts = 0.0
         play_persistent_audio(None, 0)
 
         st.markdown(f"""
@@ -1625,11 +2004,11 @@ def render_cam_01_feed(stream_url):
             {offline_badge}
           </div>
         </div>""", unsafe_allow_html=True)
-        st.image(create_placeholder("CAM 01", "STANDBY"), width="stretch")
+        render_cam_view(get_placeholder_b64("CAM 01", "STANDBY"))
         return
 
-    # If stream_url is not configured yet
     if not stream_url:
+        mjpeg_state["worker"] = None
         st.markdown(f"""
         <div class="cam-card-hdr">
           <div class="cam-card-meta">
@@ -1641,11 +2020,11 @@ def render_cam_01_feed(stream_url):
             {offline_badge}
           </div>
         </div>""", unsafe_allow_html=True)
-        st.image(create_placeholder("CAM 01", "NO SIGNAL"), width="stretch")
+        render_cam_view(get_placeholder_b64("CAM 01", "NO SIGNAL"))
         return
 
-    # When armed, ensure background worker is running for stream_url
-    worker = st.session_state.get('camera_worker')
+    # Ensure background CameraWorker is running and attached to MJPEG server
+    worker = st.session_state.get("camera_worker")
     if worker is None or not worker.running or worker.ip_url != stream_url:
         if worker is not None:
             try:
@@ -1662,165 +2041,85 @@ def render_cam_01_feed(stream_url):
         )
         st.session_state.camera_worker = worker
         worker.start()
+        st.session_state["stream_token"] = st.session_state.get("stream_token", 0) + 1
 
-    # Read latest raw frame and async YOLO detection state from worker
-    raw_frame, detections, person_count, fire_spotted, inf_ms = worker.get_display_data()
+    mjpeg_state["worker"] = worker
 
-    st.session_state.live_crowd_count = person_count
-
-    has_feed = (raw_frame is not None)
-    badge1 = live_badge if has_feed else warn_badge
-    crowd_str = f"{person_count} / {CROWD_THRESHOLD}"
-
-    st.markdown(f"""
-    <div class="cam-card-hdr">
-      <div class="cam-card-meta">
-        <span class="cam-id">CAM 01</span>
-        <span class="cam-name">MIET College Main Gate</span>
-      </div>
-      <div class="cam-card-right">
-        <span class="cam-crowd-count">{crowd_str}</span>
-        {badge1}
-      </div>
-    </div>""", unsafe_allow_html=True)
-
-    if raw_frame is not None:
-        annotated = draw_hud_and_detections(raw_frame, detections, inf_ms)
-        # Fast JPEG bytes encoding for zero Streamlit conversion overhead
-        ret, jpeg_buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        if ret and jpeg_buf is not None and len(jpeg_buf) > 0:
-            st.image(jpeg_buf.tobytes(), width="stretch")
-        else:
-            st.image(annotated, channels="BGR", width="stretch")
-    else:
-        st.image(create_placeholder("CAM 01", "CONNECTING"), width="stretch")
-        if str(stream_url).startswith("http"):
-            st.markdown(
-                f'<div style="font-family:var(--mono);font-size:11px;color:var(--amber);text-align:center;padding:6px 0;">'
-                f'Awaiting feed ({stream_url}) &middot; Ensure camera server is running</div>',
-                unsafe_allow_html=True
-            )
-
-    # ── HAZARD DETECTION ENGINE ("Latest Hazard Wins" + Silence Cooldown + Debounced Clearing) ──
-    if is_silenced:
-        st.session_state.active_alert = None
-        st.session_state.active_audio_b64 = None
-        st.session_state.audio_expire_ts = 0.0
-        play_persistent_audio(None, 0)
-        # Debounced Auto-Release
-        if not fire_spotted and person_count <= CROWD_THRESHOLD:
-            if st.session_state.hazard_clear_ts is None:
-                st.session_state.hazard_clear_ts = now
-            elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
-                st.session_state.silenced_until  = 0.0
-                st.session_state.hazard_clear_ts = None
-        else:
-            st.session_state.hazard_clear_ts = None
-    else:
-        if fire_spotted:
-            st.session_state.hazard_clear_ts = None
-            prev_alert = st.session_state.get("active_alert")
-            if prev_alert != "FIRE":
-                last_audio = st.session_state.last_audio_ts.get("FIRE", 0.0)
-                if now - last_audio > AUDIO_COOLDOWN_SEC:
-                    trigger_hindi_alert(FIRE_TTS_TEXT)
-                    st.session_state.last_audio_ts["FIRE"] = now
-                email_alerter.send_alert("FIRE")
-            st.session_state.active_alert = "FIRE"
-
-        elif person_count > CROWD_THRESHOLD:
-            st.session_state.hazard_clear_ts = None
-            prev_alert = st.session_state.get("active_alert")
-            if prev_alert != "CROWD":
-                last_audio = st.session_state.last_audio_ts.get("CROWD", 0.0)
-                if now - last_audio > AUDIO_COOLDOWN_SEC:
-                    trigger_hindi_alert(CROWD_TTS_TEXT)
-                    st.session_state.last_audio_ts["CROWD"] = now
-                email_alerter.send_alert("CROWD", person_count)
-            st.session_state.active_alert = "CROWD"
-
-        else:
-            # Reset alert display if hazards have cleared (debounced with grace period to prevent flickering)
-            if st.session_state.get("active_alert") is not None:
-                if st.session_state.hazard_clear_ts is None:
-                    st.session_state.hazard_clear_ts = now
-                elif now - st.session_state.hazard_clear_ts >= ALERT_CLEAR_GRACE_SEC:
-                    st.session_state.active_alert = None
-                    st.session_state.hazard_clear_ts = None
-
-    # Persistent Web Audio Playback (Loops infinitely until Silence/Disarm)
-    active_b64 = st.session_state.get('active_audio_b64')
-    active_id = st.session_state.get('active_audio_id', 0)
-
-    if armed and not is_silenced and active_b64:
-        play_persistent_audio(active_b64, active_id)
-    else:
-        if not armed or is_silenced:
-            st.session_state.active_audio_b64 = None
-            play_persistent_audio(None, 0)
-
-    # Contextual Silence Button: Only rendered when an alert is actively ringing on CAM 01
-    if armed and not is_silenced and st.session_state.get("active_alert") is not None:
-        st.button("Silence Alert", key="silence_1", on_click=silence_alerts, width="stretch")
-
-col1, col2 = st.columns(2)
-
-with col1:
+    # 1) Lightweight 1Hz status & alert fragment (top of card)
     if hasattr(st, "fragment"):
-        @st.fragment(run_every=0.15)
-        def cam_01_live_fragment(stream_url):
-            render_cam_01_feed(stream_url)
+        @st.fragment(run_every=1.0)
+        def cam_01_status_fragment():
+            _render_cam_01_telemetry_and_alerts()
 
-        cam_01_live_fragment(ip_url)
+        cam_01_status_fragment()
     else:
-        render_cam_01_feed(ip_url)
-        if st.session_state.system_armed:
-            time.sleep(0.15)
-            st.rerun()
+        _render_cam_01_telemetry_and_alerts()
 
-with col2:
-    st.markdown(f"""
-    <div class="cam-card-hdr">
-      <div class="cam-card-meta">
-        <span class="cam-id">CAM 02</span>
-        <span class="cam-name">Railway Station Entrance</span>
-      </div>
-      <div class="cam-card-right">
-        <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
-        {offline_badge}
-      </div>
-    </div>""", unsafe_allow_html=True)
-    st.image(create_placeholder("CAM 02", "STANDBY"), width="stretch")
+    # 2) Uninterrupted Native MJPEG Stream (OUTSIDE fragment -> zero flicker, zero freeze)
+    stream_endpoint = os.environ.get("MJPEG_STREAM_URL", "http://localhost:8502/stream")
+    token = st.session_state.get("stream_token", 0)
+    max_h = "74vh" if st.session_state.get("focus_cam_01", False) else "none"
+    st.markdown(
+        f'''<div style="width:100%; aspect-ratio:16/9; max-height:{max_h}; background:#0C0C0E; border:1px solid #27272A; border-top:none; border-radius:0 0 8px 8px; overflow:hidden; display:flex; align-items:center; justify-content:center;">
+  <img src="{stream_endpoint}?v={token}" style="width:100%; height:100%; object-fit:contain; display:block;" />
+</div>''',
+        unsafe_allow_html=True
+    )
 
-col3, col4 = st.columns(2)
+render_cam_01_feed = render_cam_01_section
 
-with col3:
-    st.markdown(f"""
-    <div class="cam-card-hdr">
-      <div class="cam-card-meta">
-        <span class="cam-id">CAM 03</span>
-        <span class="cam-name">Metro Station Entrance</span>
-      </div>
-      <div class="cam-card-right">
-        <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
-        {offline_badge}
-      </div>
-    </div>""", unsafe_allow_html=True)
-    st.image(create_placeholder("CAM 03", "STANDBY"), width="stretch")
+if st.session_state.get("focus_cam_01", False):
+    render_cam_01_section(ip_url)
+else:
+    col1, col2 = st.columns(2)
 
-with col4:
-    st.markdown(f"""
-    <div class="cam-card-hdr">
-      <div class="cam-card-meta">
-        <span class="cam-id">CAM 04</span>
-        <span class="cam-name">Server Room Backend</span>
-      </div>
-      <div class="cam-card-right">
-        <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
-        {offline_badge}
-      </div>
-    </div>""", unsafe_allow_html=True)
-    st.image(create_placeholder("CAM 04", "STANDBY"), width="stretch")
+    with col1:
+        render_cam_01_section(ip_url)
+
+    with col2:
+        st.markdown(f"""
+        <div class="cam-card-hdr">
+          <div class="cam-card-meta">
+            <span class="cam-id">CAM 02</span>
+            <span class="cam-name">Railway Station Entrance</span>
+          </div>
+          <div class="cam-card-right">
+            <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+            {offline_badge}
+          </div>
+        </div>""", unsafe_allow_html=True)
+        render_cam_view(get_placeholder_b64("CAM 02", "STANDBY"))
+
+    col3, col4 = st.columns(2)
+
+    with col3:
+        st.markdown(f"""
+        <div class="cam-card-hdr">
+          <div class="cam-card-meta">
+            <span class="cam-id">CAM 03</span>
+            <span class="cam-name">Metro Station Entrance</span>
+          </div>
+          <div class="cam-card-right">
+            <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+            {offline_badge}
+          </div>
+        </div>""", unsafe_allow_html=True)
+        render_cam_view(get_placeholder_b64("CAM 03", "STANDBY"))
+
+    with col4:
+        st.markdown(f"""
+        <div class="cam-card-hdr">
+          <div class="cam-card-meta">
+            <span class="cam-id">CAM 04</span>
+            <span class="cam-name">Server Room Backend</span>
+          </div>
+          <div class="cam-card-right">
+            <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+            {offline_badge}
+          </div>
+        </div>""", unsafe_allow_html=True)
+        render_cam_view(get_placeholder_b64("CAM 04", "STANDBY"))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FOOTER STATUS BAR

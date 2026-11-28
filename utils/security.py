@@ -248,9 +248,8 @@ def get_local_ip() -> str:
         s.connect(("8.8.8.8", 80))
         sock_ip = s.getsockname()[0]
         s.close()
-        ip_str = str(sock_ip)
-        if not ip_str.startswith("127."):
-            return ip_str
+        if isinstance(sock_ip, str) and not sock_ip.startswith("127."):
+            return sock_ip
     except Exception:
         pass
 
@@ -259,9 +258,9 @@ def get_local_ip() -> str:
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
             sockaddr = info[4]
             if isinstance(sockaddr, tuple) and len(sockaddr) > 0:
-                ip_str = str(sockaddr[0])
-                if not ip_str.startswith("127."):
-                    return ip_str
+                host_val = sockaddr[0]
+                if isinstance(host_val, str) and not host_val.startswith("127."):
+                    return host_val
     except Exception:
         pass
 
@@ -279,9 +278,11 @@ def get_all_local_ips() -> set[str]:
         for info in socket.getaddrinfo(hostname, None):
             sockaddr = info[4]
             if isinstance(sockaddr, tuple) and len(sockaddr) > 0:
-                clean = clean_ip_address(str(sockaddr[0]))
-                if clean:
-                    local_ips.add(clean)
+                host_val = sockaddr[0]
+                if isinstance(host_val, str):
+                    clean = clean_ip_address(host_val)
+                    if clean:
+                        local_ips.add(clean)
     except Exception:
         pass
     return local_ips
@@ -301,9 +302,8 @@ def get_local_subnets() -> list[str]:
         s.connect(("8.8.8.8", 80))
         sock_ip = s.getsockname()[0]
         s.close()
-        local_ip = str(sock_ip)
-        if not local_ip.startswith("127."):
-            net = ipaddress.ip_network(f"{local_ip}/24", strict=False)
+        if isinstance(sock_ip, str) and not sock_ip.startswith("127."):
+            net = ipaddress.ip_network(f"{sock_ip}/24", strict=False)
             subnets.add(str(net))
     except Exception:
         pass
@@ -314,9 +314,9 @@ def get_local_subnets() -> list[str]:
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
             sockaddr = info[4]
             if isinstance(sockaddr, tuple) and len(sockaddr) > 0:
-                ip_str = str(sockaddr[0])
-                if not ip_str.startswith("127."):
-                    net = ipaddress.ip_network(f"{ip_str}/24", strict=False)
+                host_val = sockaddr[0]
+                if isinstance(host_val, str) and not host_val.startswith("127."):
+                    net = ipaddress.ip_network(f"{host_val}/24", strict=False)
                     subnets.add(str(net))
     except Exception:
         pass
