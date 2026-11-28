@@ -406,16 +406,84 @@ button:has(div:contains("DISARM SYSTEM")):hover {
   background: rgba(239, 68, 68, 0.18) !important;
   border-color: var(--red) !important;
 }
-button:has(p:contains("Silence Alert")),
-button:has(div:contains("Silence Alert")) {
-  background: var(--red-dim) !important;
-  border: 1px solid var(--red-border) !important;
-  color: var(--red) !important;
-  margin-top: 6px !important;
+/* ── HIGH-VISIBILITY SILENCE ALERT BUTTON ── */
+@keyframes silencePulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(252, 165, 165, 0.55), 0 4px 16px rgba(220, 38, 38, 0.45); }
+  50%      { box-shadow: 0 0 0 2px rgba(254, 202, 202, 0.85), 0 6px 24px rgba(239, 68, 68, 0.70); }
 }
-button:has(p:contains("Silence Alert")):hover,
-button:has(div:contains("Silence Alert")):hover {
-  background: rgba(239, 68, 68, 0.2) !important;
+.st-key-silence_1 button,
+div[data-testid="stElementContainer"]:has(.hz-silence-marker) + div[data-testid="stElementContainer"] button,
+div.element-container:has(.hz-silence-marker) + div.element-container button {
+  background: #DC2626 !important;
+  border: 1px solid #F87171 !important;
+  color: #FFFFFF !important;
+  font-weight: 700 !important;
+  font-size: 13px !important;
+  letter-spacing: 0.05em !important;
+  padding: 11px 16px !important;
+  margin-top: 8px !important;
+  animation: silencePulse 1.4s ease-in-out infinite !important;
+}
+.st-key-silence_1 button:hover,
+div[data-testid="stElementContainer"]:has(.hz-silence-marker) + div[data-testid="stElementContainer"] button:hover,
+div.element-container:has(.hz-silence-marker) + div.element-container button:hover {
+  background: #B91C1C !important;
+  border-color: #FCA5A5 !important;
+  color: #FFFFFF !important;
+}
+
+/* ── CAMERA VIEWPORT & NATIVE FULLSCREEN BUTTON ── */
+.hz-cam-box {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16/9;
+  background: #0C0C0E;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.hz-cam-box img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.hz-fs-btn {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  z-index: 20;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: rgba(9, 9, 11, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #FAFAFA;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+.hz-fs-btn:hover {
+  background: rgba(24, 24, 27, 0.95);
+  border-color: rgba(255, 255, 255, 0.45);
+  transform: scale(1.06);
+}
+.hz-cam-box:fullscreen,
+.hz-cam-box:-webkit-full-screen {
+  width: 100vw !important;
+  height: 100vh !important;
+  max-height: 100vh !important;
+  aspect-ratio: auto !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: #000000 !important;
 }
 
 /* ── SLIM HEADER BAR ── */
@@ -735,7 +803,6 @@ div[data-testid="stAudio"] {
 # ─────────────────────────────────────────────────────────────────────────────
 if 'system_armed'      not in st.session_state: st.session_state.system_armed      = False
 if 'is_operator'       not in st.session_state: st.session_state.is_operator       = True
-if 'focus_cam_01'      not in st.session_state: st.session_state.focus_cam_01      = False
 if 'paired_camera_url' not in st.session_state: st.session_state.paired_camera_url  = None
 if 'do_clear_alert'    not in st.session_state: st.session_state.do_clear_alert    = False
 if 'active_alert'      not in st.session_state: st.session_state.active_alert      = None
@@ -850,11 +917,21 @@ def get_placeholder_b64(cam_name: str, status: str = "STANDBY") -> str:
         return base64.b64encode(buf.tobytes()).decode("ascii")
     return ""
 
+_FS_ICON_SVG = (
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<polyline points="15 3 21 3 21 9"></polyline>'
+    '<polyline points="9 21 3 21 3 15"></polyline>'
+    '<line x1="21" y1="3" x2="14" y2="10"></line>'
+    '<line x1="3" y1="21" x2="10" y2="14"></line>'
+    '</svg>'
+)
+
 def render_cam_view(b64_str: str):
-    max_h = "74vh" if st.session_state.get("focus_cam_01", False) else "none"
     st.markdown(
-        f'''<div style="width:100%; aspect-ratio:16/9; max-height:{max_h}; background:#0C0C0E; border-radius:6px; overflow:hidden; display:flex; align-items:center; justify-content:center;">
-  <img src="data:image/jpeg;base64,{b64_str}" style="width:100%; height:100%; object-fit:contain; display:block;" />
+        f'''<div class="hz-cam-box">
+  <img src="data:image/jpeg;base64,{b64_str}" />
+  <div class="hz-fs-btn" role="button" tabindex="0" title="Toggle Fullscreen">{_FS_ICON_SVG}</div>
 </div>''',
         unsafe_allow_html=True
     )
@@ -1372,9 +1449,11 @@ class CameraWorker:
             fallback_until = time.time() + 5.0
             while self.running and time.time() < fallback_until:
                 try:
-                    if self.shot_url is not None:
-                        resp = self.session.get(
-                            self.shot_url,
+                    shot_url = self.shot_url
+                    session = self.session
+                    if shot_url is not None and session is not None:
+                        resp = session.get(
+                            shot_url,
                             timeout=(2.0, 2.0),
                             headers=headers
                         )
@@ -1695,11 +1774,6 @@ with st.sidebar:
             st.toast("System Disarmed · Standby Mode")
             st.rerun()
 
-    view_label = "Exit Full View (2x2 Grid)" if st.session_state.focus_cam_01 else "Expand CAM 01 (Full View)"
-    if st.button(view_label, width="stretch", key="btn_toggle_focus"):
-        st.session_state.focus_cam_01 = not st.session_state.focus_cam_01
-        st.rerun()
-
     # ── TELEMETRY & ESSENTIAL SETTINGS ──
     st.markdown(f"""
     <div class="sb-divider"></div>
@@ -1973,7 +2047,8 @@ def _render_cam_01_telemetry_and_alerts():
         st.session_state.get("active_alert") is not None
         or st.session_state.get("active_audio_b64") is not None
     ):
-        st.button("Silence Alert", key="silence_1", on_click=silence_alerts, width="stretch")
+        st.markdown('<span class="hz-silence-marker"></span>', unsafe_allow_html=True)
+        st.button("🔇 SILENCE ALERT", key="silence_1", on_click=silence_alerts, width="stretch")
 
 
 def render_cam_01_section(stream_url: str):
@@ -2058,67 +2133,64 @@ def render_cam_01_section(stream_url: str):
     # 2) Uninterrupted Native MJPEG Stream (OUTSIDE fragment -> zero flicker, zero freeze)
     stream_endpoint = os.environ.get("MJPEG_STREAM_URL", "http://localhost:8502/stream")
     token = st.session_state.get("stream_token", 0)
-    max_h = "74vh" if st.session_state.get("focus_cam_01", False) else "none"
     st.markdown(
-        f'''<div style="width:100%; aspect-ratio:16/9; max-height:{max_h}; background:#0C0C0E; border:1px solid #27272A; border-top:none; border-radius:0 0 8px 8px; overflow:hidden; display:flex; align-items:center; justify-content:center;">
-  <img src="{stream_endpoint}?v={token}" style="width:100%; height:100%; object-fit:contain; display:block;" />
+        f'''<div class="hz-cam-box">
+  <img src="{stream_endpoint}?v={token}" />
+  <div class="hz-fs-btn" role="button" tabindex="0" title="Toggle Fullscreen">{_FS_ICON_SVG}</div>
 </div>''',
         unsafe_allow_html=True
     )
 
 render_cam_01_feed = render_cam_01_section
 
-if st.session_state.get("focus_cam_01", False):
+col1, col2 = st.columns(2)
+
+with col1:
     render_cam_01_section(ip_url)
-else:
-    col1, col2 = st.columns(2)
 
-    with col1:
-        render_cam_01_section(ip_url)
+with col2:
+    st.markdown(f"""
+    <div class="cam-card-hdr">
+      <div class="cam-card-meta">
+        <span class="cam-id">CAM 02</span>
+        <span class="cam-name">Railway Station Entrance</span>
+      </div>
+      <div class="cam-card-right">
+        <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+        {offline_badge}
+      </div>
+    </div>""", unsafe_allow_html=True)
+    render_cam_view(get_placeholder_b64("CAM 02", "STANDBY"))
 
-    with col2:
-        st.markdown(f"""
-        <div class="cam-card-hdr">
-          <div class="cam-card-meta">
-            <span class="cam-id">CAM 02</span>
-            <span class="cam-name">Railway Station Entrance</span>
-          </div>
-          <div class="cam-card-right">
-            <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
-            {offline_badge}
-          </div>
-        </div>""", unsafe_allow_html=True)
-        render_cam_view(get_placeholder_b64("CAM 02", "STANDBY"))
+col3, col4 = st.columns(2)
 
-    col3, col4 = st.columns(2)
+with col3:
+    st.markdown(f"""
+    <div class="cam-card-hdr">
+      <div class="cam-card-meta">
+        <span class="cam-id">CAM 03</span>
+        <span class="cam-name">Metro Station Entrance</span>
+      </div>
+      <div class="cam-card-right">
+        <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+        {offline_badge}
+      </div>
+    </div>""", unsafe_allow_html=True)
+    render_cam_view(get_placeholder_b64("CAM 03", "STANDBY"))
 
-    with col3:
-        st.markdown(f"""
-        <div class="cam-card-hdr">
-          <div class="cam-card-meta">
-            <span class="cam-id">CAM 03</span>
-            <span class="cam-name">Metro Station Entrance</span>
-          </div>
-          <div class="cam-card-right">
-            <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
-            {offline_badge}
-          </div>
-        </div>""", unsafe_allow_html=True)
-        render_cam_view(get_placeholder_b64("CAM 03", "STANDBY"))
-
-    with col4:
-        st.markdown(f"""
-        <div class="cam-card-hdr">
-          <div class="cam-card-meta">
-            <span class="cam-id">CAM 04</span>
-            <span class="cam-name">Server Room Backend</span>
-          </div>
-          <div class="cam-card-right">
-            <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
-            {offline_badge}
-          </div>
-        </div>""", unsafe_allow_html=True)
-        render_cam_view(get_placeholder_b64("CAM 04", "STANDBY"))
+with col4:
+    st.markdown(f"""
+    <div class="cam-card-hdr">
+      <div class="cam-card-meta">
+        <span class="cam-id">CAM 04</span>
+        <span class="cam-name">Server Room Backend</span>
+      </div>
+      <div class="cam-card-right">
+        <span class="cam-crowd-count">— / {CROWD_THRESHOLD}</span>
+        {offline_badge}
+      </div>
+    </div>""", unsafe_allow_html=True)
+    render_cam_view(get_placeholder_b64("CAM 04", "STANDBY"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2139,3 +2211,30 @@ st.markdown("""
 })();
 </script>
 """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NATIVE FULLSCREEN CLICK HANDLER
+# ─────────────────────────────────────────────────────────────────────────────
+components.html("""
+<script>
+(function() {
+  const w = window.parent;
+  if (!w || !w.document || w._hzFsBound) return;
+  w._hzFsBound = true;
+  w.document.addEventListener("click", function(e) {
+    const btn = e.target.closest(".hz-fs-btn");
+    if (!btn) return;
+    const box = btn.closest(".hz-cam-box");
+    if (!box) return;
+    const doc = w.document;
+    if (doc.fullscreenElement === box || doc.webkitFullscreenElement === box) {
+      if (doc.exitFullscreen) doc.exitFullscreen();
+      else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
+    } else {
+      if (box.requestFullscreen) box.requestFullscreen();
+      else if (box.webkitRequestFullscreen) box.webkitRequestFullscreen();
+    }
+  });
+})();
+</script>
+""", height=0, width=0)
